@@ -2,46 +2,38 @@
 
 ![Keep Codex Fast cover](assets/keep-codex-fast-cover.png)
 
-Keep Codex fast when your local workspace starts getting heavy from weeks of chats, terminals, logs, worktrees, and project history.
+Keep Codex fast when your local workspace gets heavy from weeks of chats, terminals, logs, worktrees, and project history.
 
 This skill helps you clean things up without losing context.
 
-It is built around one simple rule:
+The rule is simple:
 
 > Make handoffs first. Archive, don't delete. Clean up only when you are ready.
-
-The basic flow:
-
-- inspect first
-- make handoffs for work you still care about
-- back up important local state
-- archive heavy old history instead of deleting it
-- verify Codex feels lighter afterward
 
 ## Who This Is For
 
 Use this if Codex has started feeling slower after heavy use, especially if you:
 
-- keep lots of long chats
+- keep long chats around
 - resume old threads often
 - work across many repos
 - run multiple terminals or dev servers
-- want a weekly cleanup habit that does not feel risky
+- want cleanup to feel safe, not scary
 
 ## What It Does
 
-The skill helps Codex:
+By default, this skill only reports. It does not change anything until you explicitly ask it to.
 
-- inspect what is making local state heavy
-- create handoff docs before old chats are archived
+It helps Codex:
+
+- see what is making local state heavy
+- create handoff docs before archiving old chats
 - back up important state before cleanup
 - archive old chats instead of deleting them
 - move stale worktrees out of the hot path
 - rotate large logs
-- clean up dead project references
+- clean dead project references
 - report heavy Node/dev processes without killing them
-
-By default, it only reports. It does not mutate anything unless you explicitly ask it to.
 
 ## Quick Start
 
@@ -51,27 +43,24 @@ Ask Codex:
 Use $keep-codex-fast to inspect my Codex local state and recommend a safe cleanup plan.
 ```
 
-Codex should first show you what it found, then help you decide what to hand off, what to keep active, and what can be archived.
+Codex should show you what it found first. Then you decide what to hand off, what to keep active, and what can be archived.
 
-## Before Cleanup: Make Handoffs
+## Handoffs First
 
 Before archiving old active chats, create handoff documents for any repo/session you may want to continue.
 
-A handoff document is a small continuity file. It captures what you were doing, what changed, what files matter, what commands ran, what is broken, and what to do next.
+A handoff is a small continuity note. It captures:
 
-This lets you archive the heavy chat history and start a fresh Codex thread without losing the thread of the work.
+- what you were doing
+- what changed
+- what files matter
+- what commands or checks already ran
+- what is still broken or undecided
+- what to do next
 
-Recommended habit: create handoffs for all active repo chats you may continue, even before you feel slowdown. It keeps chats for execution and docs for memory.
+That lets you archive the heavy chat and start a fresh Codex thread from the handoff.
 
-In plain English, a handoff helps you:
-
-- keep the project memory
-- drop the heavy chat baggage
-- restart from a clean thread
-- give Codex the exact next steps
-- avoid re-explaining where you left off
-
-Copy-paste this into each active repo chat you care about:
+Copy this into each active repo chat you care about:
 
 ```text
 Create a comprehensive handoff document for this repo/session before I archive or clean up Codex history.
@@ -92,9 +81,7 @@ Also include a reactivation prompt I can paste into a fresh Codex chat so it can
 Save the handoff in a sensible repo-local place like docs/codex-handoffs/YYYY-MM-DD-topic.md unless this repo already has a better handoff location.
 ```
 
-Then start the fresh chat with the reactivation prompt from that handoff.
-
-## Safe Cleanup Prompt
+## Safe Cleanup
 
 After handoffs exist for the chats you care about, use this:
 
@@ -108,25 +95,13 @@ Then back up first, archive instead of deleting, move stale worktrees, rotate la
 If Codex is currently running, do not mutate local state. Tell me to close Codex first.
 ```
 
-## Optional: Make It A Weekly Or Biweekly Reminder
+## Weekly Or Biweekly Reminder
 
-After you run the first cleanup safely, you can ask Codex to turn this into a recurring maintenance reminder.
+Recurring maintenance should be a reminder, not automatic cleanup.
 
-Important: recurring maintenance should be report-only. It can inspect, summarize, and remind you to create handoffs, but it should not archive, move, prune, rotate, normalize, delete, or mutate local Codex state automatically.
+Why: an automation cannot know whether you created handoffs for chats you still care about. It should inspect and remind you, but not archive, move, prune, rotate, normalize, delete, or mutate anything by itself.
 
-Why: an automation cannot reliably know whether you created handoff docs for the active repo chats you still care about. Mutating cleanup should stay manual unless you are present to confirm handoffs exist or are not needed.
-
-Weekly is best if you use Codex heavily across many repos and terminals. Biweekly is enough if your usage is lighter.
-
-Use the reminder for:
-
-- noticing when sessions are getting large again
-- catching stale worktrees before they pile up
-- seeing when logs are growing
-- remembering to create handoffs before manual cleanup
-- keeping maintenance boring instead of emergency-shaped
-
-Copy-paste this into Codex:
+Copy this into Codex:
 
 ```text
 Use $keep-codex-fast to create a recurring Codex maintenance reminder.
@@ -143,11 +118,9 @@ The reminder should:
 - tell me that manual cleanup should only happen after I confirm handoffs exist or are not needed and Codex is closed
 ```
 
-If your Codex app supports automations, ask it to schedule this reminder directly. If not, keep the prompt saved and run it manually once a week or every other week.
-
 ## Install
 
-Install it with Codex's skill installer by pointing it at the repo:
+Ask Codex:
 
 ```text
 Install the keep-codex-fast skill from https://github.com/vibeforge1111/keep-codex-fast
@@ -155,23 +128,11 @@ Install the keep-codex-fast skill from https://github.com/vibeforge1111/keep-cod
 
 Or clone/copy this folder into your Codex skills directory as `keep-codex-fast`.
 
-For chats you still care about:
-
-```text
-Use $keep-codex-fast to identify active repo chats I may want to continue, create comprehensive handoff docs and reactivation prompts for them, then archive only after continuity is preserved.
-```
-
-Then, after reviewing the report and closing Codex if needed:
-
-```text
-Use $keep-codex-fast to apply the cleanup with backups, archive old non-pinned sessions, move stale worktrees, rotate large logs, and verify the result.
-```
-
 ## Advanced: Manual Script Use
 
 Most users can stay inside Codex and use the prompts above. The script is here for people who want to run it directly.
 
-From this repo:
+Report only:
 
 ```bash
 python scripts/keep_codex_fast.py
@@ -189,75 +150,25 @@ Wait for Codex to exit before applying:
 python scripts/keep_codex_fast.py --apply --wait-for-codex-exit
 ```
 
-## What It Cleans
+## What Gets Cleaned
+
+The skill can safely handle:
 
 - old non-pinned active sessions
 - stale worktrees
 - large `logs_2.sqlite*` files
 - dead/temp project entries in `config.toml`
-- Windows `\\?\C:\...` extended path mismatches in local SQLite text fields
+- Windows `\\?\C:\...` path mismatches in local SQLite text fields
 
-It does not permanently delete chats, logs, or worktrees. It moves them into archive folders under `~/.codex` and writes backup/restore artifacts under `~/Documents/Codex/codex-backups` when available.
+It does not permanently delete chats, logs, or worktrees. It moves them into archive folders and writes backup/restore artifacts when available.
 
-## Recommended Flow
+## Mental Model
 
-1. Run a report-only inspection.
-2. Create handoff docs and reactivation prompts for active repo chats you may want to continue.
-3. Review large active chats and decide what can be archived.
-4. Close Codex before applying cleanup.
-5. Apply archive-only cleanup.
-6. Re-run inspection to verify the result.
-7. Decide whether to make this a weekly or biweekly report-only reminder.
+- Chats are for execution.
+- Handoff docs are for memory.
+- Archives are for history.
+- Fresh threads are for speed.
 
-## The Mental Model
+## Flow
 
-Use chats for execution.
-
-Use handoff docs for memory.
-
-Use archives for history.
-
-Use fresh threads for speed.
-
-That is the main pattern this skill is trying to make easy.
-
-## What Goes In A Handoff?
-
-For important repo work, the skill should help create a handoff doc before archiving the old chat. A good handoff includes:
-
-- repo/path and branch
-- current goal
-- work already completed
-- files touched or investigated
-- commands/tests run
-- known errors or warnings
-- open decisions
-- next concrete steps
-- a reactivation prompt for starting fresh
-
-## Why This Exists
-
-Long-running AI coding workspaces accumulate local drag. The model may be fine, but local sessions, logs, worktrees, and stale project metadata can make the app feel slower and more fragile.
-
-This skill turns cleanup into a boring weekly maintenance routine.
-
-## How The Skill Helps
-
-```mermaid
-flowchart TD
-    A["Codex feels slow or cluttered"] --> B["Run report-only inspection"]
-    B --> C["See large chats, logs, worktrees, and path issues"]
-    C --> D{"Any active repo chats worth continuing?"}
-    D -->|Yes| E["Create handoff docs and reactivation prompts"]
-    D -->|No| F["Confirm no handoff needed"]
-    E --> G["Close Codex before manual cleanup"]
-    F --> G
-    G --> H["Back up local state"]
-    H --> I["Archive old chats, move stale worktrees, rotate large logs"]
-    I --> J["Verify config, database, paths, and folder sizes"]
-    J --> K["Start fresh threads from handoffs"]
-    K --> L["Less local drag, cleaner history, faster-feeling Codex"]
-    B --> M["Optional weekly or biweekly reminder"]
-    M --> N["Report only, no automatic cleanup"]
-    N --> C
-```
+![Keep Codex Fast flow](assets/keep-codex-fast-flow.svg)
