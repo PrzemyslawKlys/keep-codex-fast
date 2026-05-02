@@ -1,5 +1,7 @@
 # Keep Codex Fast
 
+![Keep Codex Fast cover](assets/keep-codex-fast-cover.png)
+
 A backup-first, archive-only Codex skill for cleaning local agent state when Codex starts feeling slow after weeks of chats, terminals, worktrees, logs, and project history.
 
 The skill is intentionally conservative:
