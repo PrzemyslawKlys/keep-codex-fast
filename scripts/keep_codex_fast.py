@@ -212,6 +212,10 @@ def normalize_extended_path(value: str) -> str:
     return value
 
 
+def normalized_path(value: str) -> Path:
+    return Path(normalize_extended_path(value))
+
+
 def normalize_sqlite_paths(conn: sqlite3.Connection, apply: bool) -> int:
     cur = conn.cursor()
     total = 0
@@ -264,7 +268,7 @@ def active_session_candidates(
             continue
         if updated_at is not None and int(updated_at) >= cutoff:
             continue
-        source = Path(rollout_path)
+        source = normalized_path(rollout_path)
         if not source.exists():
             continue
         try:

@@ -155,6 +155,31 @@ def assert_session_alias_detection(module) -> None:
         assert len(candidates) == 1
 
 
+def assert_extended_rollout_path_detection(module) -> None:
+    if os.name != "nt":
+        return
+
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_fake_home(Path(td))
+        extended_rollout = "\\\\?\\" + str(paths["rollout"])
+        conn = sqlite3.connect(paths["state_db"])
+        conn.execute(
+            "update threads set rollout_path=? where id=?",
+            (extended_rollout, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        )
+        conn.commit()
+        conn.close()
+
+        conn = module.sqlite_connect(paths["state_db"], readonly=True)
+        try:
+            candidates = module.active_session_candidates(conn, paths["codex_home"], 10)
+        finally:
+            conn.close()
+
+        assert len(candidates) == 1
+        assert candidates[0].source == paths["rollout"]
+
+
 def assert_apply_mode(module) -> None:
     with tempfile.TemporaryDirectory() as td:
         paths = make_fake_home(Path(td))
@@ -199,6 +224,7 @@ def main() -> int:
     assert_report_mode(module)
     assert_backup_only_mode(module)
     assert_session_alias_detection(module)
+    assert_extended_rollout_path_detection(module)
     assert_apply_mode(module)
     print("smoke tests passed")
     return 0
