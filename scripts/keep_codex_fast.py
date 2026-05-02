@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Backup-first Codex local-state maintenance.
 
-Default mode is report-only. Use --apply to archive/move/normalize.
+Default mode is a read-only, privacy-safe report. Use --apply to archive/move/normalize.
 """
 
 from __future__ import annotations
@@ -89,6 +89,19 @@ def report(line: str) -> None:
     print(line)
 
 
+def sqlite_connect(path: Path, *, readonly: bool) -> sqlite3.Connection:
+    if readonly:
+        return sqlite3.connect(f"{canonical_path(path).as_uri()}?mode=ro", uri=True)
+    return sqlite3.connect(path)
+
+
+def canonical_path(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except OSError:
+        return path.absolute()
+
+
 def codex_processes_running() -> list[str]:
     system = platform.system()
     try:
@@ -130,7 +143,7 @@ def sqlite_backup(src: Path, dst: Path) -> None:
     if not src.exists():
         return
     dst.parent.mkdir(parents=True, exist_ok=True)
-    source = sqlite3.connect(src)
+    source = sqlite_connect(src, readonly=True)
     target = sqlite3.connect(dst)
     source.backup(target)
     target.close()
@@ -239,6 +252,7 @@ def active_session_candidates(
     archive_older_than_days: int,
 ) -> list[SessionCandidate]:
     sessions_root = codex_home / "sessions"
+    sessions_root_canonical = canonical_path(sessions_root)
     cutoff = int((datetime.now() - timedelta(days=archive_older_than_days)).timestamp())
     pinned = load_pinned(codex_home)
     rows = conn.execute(
@@ -254,7 +268,7 @@ def active_session_candidates(
         if not source.exists():
             continue
         try:
-            relative = source.relative_to(sessions_root)
+            relative = canonical_path(source).relative_to(sessions_root_canonical)
         except ValueError:
             continue
         candidates.append(
@@ -271,12 +285,17 @@ def archive_sessions(
     backup_root: Path,
     stamp: str,
     apply: bool,
+    details: bool,
 ) -> None:
     total = sum(item.size for item in candidates)
     report(f"old_session_candidates {len(candidates)}")
     report(f"old_session_candidate_gb {gb(total)}")
-    for item in candidates[:10]:
-        report(f"large_session_mb {mb(item.size)} {item.thread_id} {item.title[:70]}")
+    for index, item in enumerate(candidates[:10], start=1):
+        label = f"session_{index:03d}"
+        if details:
+            report(f"large_session_mb {mb(item.size)} {label} thread_id={item.thread_id} title={item.title[:70]}")
+        else:
+            report(f"large_session_mb {mb(item.size)} {label}")
     if not apply or not candidates:
         return
 
@@ -338,7 +357,7 @@ conn.close()
     report(f"session_restore_script {restore}")
 
 
-def prune_config(codex_home: Path, backup_root: Path, apply: bool) -> None:
+def prune_config(codex_home: Path, backup_root: Path, apply: bool, write_artifacts: bool) -> None:
     path = codex_home / "config.toml"
     if not path.exists():
         report("config_prune_candidates 0")
@@ -366,10 +385,11 @@ def prune_config(codex_home: Path, backup_root: Path, apply: bool) -> None:
         else:
             out.extend(block)
 
-    (backup_root / "pruned-projects.txt").write_text(
-        "\n".join(removed) + ("\n" if removed else ""),
-        encoding="utf-8",
-    )
+    if write_artifacts:
+        (backup_root / "pruned-projects.txt").write_text(
+            "\n".join(removed) + ("\n" if removed else ""),
+            encoding="utf-8",
+        )
     report(f"config_prune_candidates {len(removed)}")
     if apply and removed:
         path.write_text("\n".join(out) + "\n", encoding="utf-8")
@@ -416,7 +436,7 @@ def rotate_logs(codex_home: Path, threshold_mb: int, stamp: str, apply: bool) ->
         report(f"logs_archive_root {archive_root}")
 
 
-def top_node_processes() -> None:
+def top_node_processes(details: bool) -> None:
     system = platform.system()
     report("top_node_processes")
     try:
@@ -433,7 +453,10 @@ def top_node_processes() -> None:
             data = json.loads(output)
             rows = data if isinstance(data, list) else [data]
             for row in rows:
-                report(f"node_mb {row.get('MB')} pid={row.get('Id')} {row.get('Path')}")
+                if details:
+                    report(f"node_mb {row.get('MB')} pid={row.get('Id')} path={row.get('Path')}")
+                else:
+                    report(f"node_mb {row.get('MB')} process=node")
             return
         output = subprocess.check_output(["ps", "-axo", "pid=,rss=,comm=,args="], text=True)
         rows = []
@@ -442,7 +465,10 @@ def top_node_processes() -> None:
             if len(parts) >= 3 and "node" in parts[2].lower():
                 rows.append((int(parts[1]), line.strip()))
         for rss, line in sorted(rows, reverse=True)[:10]:
-            report(f"node_mb {rss / 1024:.1f} {line}")
+            if details:
+                report(f"node_mb {rss / 1024:.1f} {line}")
+            else:
+                report(f"node_mb {rss / 1024:.1f} process=node")
     except Exception as exc:
         report(f"node_process_report_skipped {exc}")
 
@@ -471,24 +497,41 @@ def run(args: argparse.Namespace) -> int:
         running = []
 
     effective_apply = bool(args.apply and not running)
-    report(f"codex_home {codex_home}")
-    report(f"backup_root {backup_root}")
-    report(f"requested_mode {'apply' if args.apply else 'report'}")
-    report(f"effective_mode {'apply' if effective_apply else 'report'}")
+    effective_backup = bool(effective_apply or args.backup_only)
+    requested_mode = "apply" if args.apply else "backup-only" if args.backup_only else "report"
+    effective_mode = "apply" if effective_apply else "backup-only" if effective_backup else "report"
+    if args.details:
+        report(f"codex_home {codex_home}")
+        if effective_backup:
+            report(f"backup_root {backup_root}")
+    elif effective_backup:
+        report(f"backup_root {backup_root}")
+    report(f"requested_mode {requested_mode}")
+    report(f"effective_mode {effective_mode}")
+    if effective_mode == "report":
+        report("mode_safety read_only=true privacy=pseudonymous")
+    elif effective_mode == "backup-only":
+        report("mode_safety backup_only=true archives=false state_writes=false")
+    else:
+        report("mode_safety backup_first=true archive_only=true permanent_delete=false")
     if args.apply and running:
         report("apply_skipped_codex_running")
-        for proc in running:
-            report(f"blocking_process {proc}")
+        for index, proc in enumerate(running, start=1):
+            if args.details:
+                report(f"blocking_process {proc}")
+            else:
+                report(f"blocking_process codex_process_{index:03d}")
 
-    backup_metadata(codex_home, backup_root)
+    if effective_backup:
+        backup_metadata(codex_home, backup_root)
 
     state_db = codex_home / "state_5.sqlite"
     if state_db.exists():
-        conn = sqlite3.connect(state_db)
+        conn = sqlite_connect(state_db, readonly=not effective_apply)
         conn.execute("pragma busy_timeout=10000")
         normalize_sqlite_paths(conn, effective_apply)
         candidates = active_session_candidates(conn, codex_home, args.archive_older_than_days)
-        archive_sessions(conn, candidates, codex_home, backup_root, stamp, effective_apply)
+        archive_sessions(conn, candidates, codex_home, backup_root, stamp, effective_apply, args.details)
         if effective_apply:
             conn.commit()
             try:
@@ -503,27 +546,40 @@ def run(args: argparse.Namespace) -> int:
     else:
         report("state_db_missing")
 
-    prune_config(codex_home, backup_root, effective_apply)
+    prune_config(codex_home, backup_root, effective_apply, effective_backup)
     move_stale_worktrees(codex_home, backup_root, args.worktree_older_than_days, stamp, effective_apply)
     rotate_logs(codex_home, args.rotate_logs_above_mb, stamp, effective_apply)
     verify_sizes(codex_home)
-    top_node_processes()
+    top_node_processes(args.details)
     report("done")
     return 0
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Safe, backup-first, archive-only Codex local-state cleanup."
+        description="Safe, backup-first, archive-only Codex local-state maintenance."
     )
-    parser.add_argument("--apply", action="store_true", help="Apply cleanup. Default is report-only.")
+    parser.add_argument("--apply", action="store_true", help="Apply maintenance actions. Default is report-only.")
+    parser.add_argument(
+        "--backup-only",
+        action="store_true",
+        help="Create backups without applying maintenance actions. Default report mode writes no files.",
+    )
+    parser.add_argument(
+        "--details",
+        action="store_true",
+        help="Include raw thread IDs, titles, paths, and process paths in output.",
+    )
     parser.add_argument("--wait-for-codex-exit", action="store_true", help="Wait until Codex exits before applying.")
     parser.add_argument("--codex-home", help="Override Codex home. Defaults to CODEX_HOME or ~/.codex.")
     parser.add_argument("--backup-root", help="Override backup output folder.")
     parser.add_argument("--archive-older-than-days", type=int, default=10)
     parser.add_argument("--worktree-older-than-days", type=int, default=7)
     parser.add_argument("--rotate-logs-above-mb", type=int, default=64)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.apply and args.backup_only:
+        parser.error("--apply and --backup-only cannot be used together")
+    return args
 
 
 if __name__ == "__main__":

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import importlib.util
 import os
 import sqlite3
@@ -24,7 +26,7 @@ def load_module():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     module.codex_processes_running = lambda: []
-    module.top_node_processes = lambda: module.report("top_node_processes skipped_in_smoke")
+    module.top_node_processes = lambda details=False: module.report("top_node_processes skipped_in_smoke")
     return module
 
 
@@ -86,6 +88,36 @@ def assert_report_mode(module) -> None:
         backup = Path(td) / "backup-report"
         args = argparse.Namespace(
             apply=False,
+            backup_only=False,
+            details=False,
+            wait_for_codex_exit=False,
+            codex_home=str(paths["codex_home"]),
+            backup_root=str(backup),
+            archive_older_than_days=10,
+            worktree_older_than_days=7,
+            rotate_logs_above_mb=0,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert module.run(args) == 0
+        text = output.getvalue()
+        assert paths["rollout"].exists(), "report mode must not move sessions"
+        assert paths["worktree"].exists(), "report mode must not move worktrees"
+        assert paths["log_file"].exists(), "report mode must not rotate logs"
+        assert not backup.exists(), "report mode must not create backup artifacts"
+        assert "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" not in text
+        assert "Old test thread" not in text
+        assert str(paths["codex_home"]) not in text
+
+
+def assert_backup_only_mode(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_fake_home(Path(td))
+        backup = Path(td) / "backup-only"
+        args = argparse.Namespace(
+            apply=False,
+            backup_only=True,
+            details=False,
             wait_for_codex_exit=False,
             codex_home=str(paths["codex_home"]),
             backup_root=str(backup),
@@ -94,9 +126,33 @@ def assert_report_mode(module) -> None:
             rotate_logs_above_mb=0,
         )
         assert module.run(args) == 0
-        assert paths["rollout"].exists(), "report mode must not move sessions"
-        assert paths["worktree"].exists(), "report mode must not move worktrees"
-        assert paths["log_file"].exists(), "report mode must not rotate logs"
+        assert paths["rollout"].exists(), "backup-only mode must not move sessions"
+        assert paths["worktree"].exists(), "backup-only mode must not move worktrees"
+        assert paths["log_file"].exists(), "backup-only mode must not rotate logs"
+        assert (backup / "state_5.sqlite").exists()
+        assert (backup / "config.toml").exists()
+        assert not (backup / "moved-sessions.jsonl").exists()
+
+
+def assert_session_alias_detection(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        real_root = root / "real"
+        alias_root = root / "alias"
+        real_root.mkdir()
+        try:
+            alias_root.symlink_to(real_root, target_is_directory=True)
+        except OSError:
+            return
+
+        paths = make_fake_home(real_root)
+        alias_home = alias_root / ".codex"
+        conn = module.sqlite_connect(alias_home / "state_5.sqlite", readonly=True)
+        try:
+            candidates = module.active_session_candidates(conn, alias_home, 10)
+        finally:
+            conn.close()
+        assert len(candidates) == 1
 
 
 def assert_apply_mode(module) -> None:
@@ -105,6 +161,8 @@ def assert_apply_mode(module) -> None:
         backup = Path(td) / "backup-apply"
         args = argparse.Namespace(
             apply=True,
+            backup_only=False,
+            details=False,
             wait_for_codex_exit=False,
             codex_home=str(paths["codex_home"]),
             backup_root=str(backup),
@@ -139,6 +197,8 @@ def assert_apply_mode(module) -> None:
 def main() -> int:
     module = load_module()
     assert_report_mode(module)
+    assert_backup_only_mode(module)
+    assert_session_alias_detection(module)
     assert_apply_mode(module)
     print("smoke tests passed")
     return 0

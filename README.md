@@ -2,13 +2,13 @@
 
 ![Keep Codex Fast cover](assets/keep-codex-fast-cover.png)
 
-Keep Codex fast when your local workspace gets heavy from weeks of chats, terminals, logs, worktrees, and project history.
+When Codex starts feeling heavy after weeks of chats, terminals, logs, worktrees, and project history, this gives you a calm way to inspect what is going on and reduce local drag.
 
-This skill helps you clean things up without losing context.
+This skill helps you organize local state without losing context.
 
 The rule is simple:
 
-> Make handoffs first. Archive, don't delete. Clean up only when you are ready.
+> Make handoffs first. Archive, don't delete. Apply changes only when you are ready.
 
 ## Who This Is For
 
@@ -18,21 +18,21 @@ Use this if Codex has started feeling slower after heavy use, especially if you:
 - resume old threads often
 - work across many repos
 - run multiple terminals or dev servers
-- want cleanup to feel safe, not scary
+- want maintenance to feel safe, not scary
 
 ## What It Does
 
-By default, this skill only reports. It does not change anything until you explicitly ask it to.
+By default, this skill only reports. It does not write files, create backups, move folders, or change local Codex state until you explicitly ask it to.
 
 It helps Codex:
 
-- see what is making local state heavy
+- see which local state has grown over time
 - create handoff docs before archiving old chats
-- back up important state before cleanup
+- back up important state before applying changes
 - archive old chats instead of deleting them
 - move stale worktrees out of the hot path
 - rotate large logs
-- clean dead project references
+- prune dead project references
 - report heavy Node/dev processes without killing them
 
 ## Quick Start
@@ -40,7 +40,7 @@ It helps Codex:
 Ask Codex:
 
 ```text
-Use $keep-codex-fast to inspect my Codex local state and recommend a safe cleanup plan.
+Use $keep-codex-fast to inspect my Codex local state and recommend a safe maintenance plan.
 ```
 
 Codex should show you what it found first. Then you decide what to hand off, what to keep active, and what can be archived.
@@ -63,7 +63,7 @@ That lets you archive the heavy chat and start a fresh Codex thread from the han
 Copy this into each active repo chat you care about:
 
 ```text
-Create a comprehensive handoff document for this repo/session before I archive or clean up Codex history.
+Create a comprehensive handoff document for this repo/session before I archive Codex history.
 
 Include:
 - repo/path and branch
@@ -81,23 +81,23 @@ Also include a reactivation prompt I can paste into a fresh Codex chat so it can
 Save the handoff in a sensible repo-local place like docs/codex-handoffs/YYYY-MM-DD-topic.md unless this repo already has a better handoff location.
 ```
 
-## Safe Cleanup
+## Safe Apply
 
 After handoffs exist for the chats you care about, use this:
 
 ```text
-Use $keep-codex-fast to apply safe cleanup.
+Use $keep-codex-fast to apply safe Codex maintenance.
 
 Before changing anything, confirm that important active repo chats have handoff docs or do not need them.
 
-Then back up first, archive instead of deleting, move stale worktrees, rotate large logs, clean dead config references, and verify the result.
+Then back up first, archive instead of deleting, move stale worktrees, rotate large logs, prune dead config references, and verify the result.
 
 If Codex is currently running, do not mutate local state. Tell me to close Codex first.
 ```
 
 ## Weekly Or Biweekly Reminder
 
-Recurring maintenance should be a reminder, not automatic cleanup.
+Recurring maintenance should be a reminder, not an automatic apply.
 
 Why: an automation cannot know whether you created handoffs for chats you still care about. It should inspect and remind you, but not archive, move, prune, rotate, normalize, delete, or mutate anything by itself.
 
@@ -110,12 +110,12 @@ Schedule it weekly if I use Codex heavily, or biweekly if that seems safer.
 
 The reminder should:
 - run the keep-codex-fast report first
-- never pass --apply or run mutating cleanup automatically
+- never pass --apply or run mutating maintenance automatically
 - never archive, move, prune, rotate, normalize, delete, or mutate local Codex state
-- remind me to create comprehensive handoff docs and reactivation prompts for active repo chats before any manual cleanup
+- remind me to create comprehensive handoff docs and reactivation prompts for active repo chats before any manual apply
 - summarize active session size, archived session size, extended path candidates, old session candidates, worktree candidates, log size, and top Node/dev processes
 - report heavy Node/dev processes without killing them
-- tell me that manual cleanup should only happen after I confirm handoffs exist or are not needed and Codex is closed
+- tell me that manual apply should only happen after I confirm handoffs exist or are not needed and Codex is closed
 ```
 
 ## Install
@@ -132,13 +132,25 @@ Or clone/copy this folder into your Codex skills directory as `keep-codex-fast`.
 
 Most users can stay inside Codex and use the prompts above. The script is here for people who want to run it directly.
 
-Report only:
+Report only. This is read-only and privacy-safe by default:
 
 ```bash
 python scripts/keep_codex_fast.py
 ```
 
-Apply cleanup:
+Show raw thread IDs, chat titles, paths, and process paths only when you need detail:
+
+```bash
+python scripts/keep_codex_fast.py --details
+```
+
+Create backups only, without moving or changing local state:
+
+```bash
+python scripts/keep_codex_fast.py --backup-only
+```
+
+Apply archive/maintenance actions:
 
 ```bash
 python scripts/keep_codex_fast.py --apply --archive-older-than-days 10 --worktree-older-than-days 7
@@ -150,7 +162,7 @@ Wait for Codex to exit before applying:
 python scripts/keep_codex_fast.py --apply --wait-for-codex-exit
 ```
 
-## What Gets Cleaned
+## What Can Change
 
 The skill can safely handle:
 
@@ -160,7 +172,7 @@ The skill can safely handle:
 - dead/temp project entries in `config.toml`
 - Windows `\\?\C:\...` path mismatches in local SQLite text fields
 
-It does not permanently delete chats, logs, or worktrees. It moves them into archive folders and writes backup/restore artifacts when available.
+It does not permanently delete chats, logs, or worktrees. It moves them into archive folders and writes backup/restore artifacts before applying changes.
 
 ## Mental Model
 
