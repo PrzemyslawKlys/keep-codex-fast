@@ -150,6 +150,8 @@ Create backups only, without moving or changing local state:
 python scripts/keep_codex_fast.py --backup-only
 ```
 
+Backup folders can contain private local Codex metadata. Keep them on your machine, and do not publish or share them unless you have reviewed what is inside.
+
 Apply archive/maintenance actions:
 
 ```bash

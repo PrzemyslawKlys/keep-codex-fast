@@ -20,6 +20,7 @@ Primary principle: preserve continuity before applying changes. For active repo 
 - Write manifests and restore scripts when sessions/worktrees are moved.
 - If Codex is running, default to report-only. Apply changes only after Codex is closed or when the user explicitly accepts waiting for Codex to exit.
 - Never modify or copy credential files unless the user explicitly asks for that. Back up memory/skill/plugin/automation files before touching local state.
+- Treat backup folders as private local artifacts because they can contain Codex metadata. Do not ask users to publish or share backups unless they have reviewed them first.
 - Do not print raw thread IDs, chat titles, local paths, or process paths unless the user asks for details or runs `--details`.
 - Before applying changes, tell the user to create handoff docs for active repo chats they may continue.
 - Before archiving any active repo chat the user may want to continue, recommend creating a comprehensive handoff doc plus a reactivation prompt.
@@ -170,3 +171,5 @@ Avoid these behaviors:
 ## User-Facing Caution
 
 Tell users this does not permanently delete chats, worktrees, or logs. It moves them into archive folders and writes restore helpers. The only removed content is stale metadata, such as project entries pointing to folders that no longer exist, and even that happens after backing up `config.toml`.
+
+Also tell users backup folders can contain private local Codex metadata. They should keep backups local and avoid publishing or sharing them unless they have reviewed what is inside.
