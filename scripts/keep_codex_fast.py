@@ -426,9 +426,15 @@ def move_stale_worktrees(codex_home: Path, backup_root: Path, days: int, stamp: 
 
 
 def rotate_logs(codex_home: Path, threshold_mb: int, stamp: str, apply: bool) -> None:
-    files = [path for path in codex_home.glob("logs_2.sqlite*") if path.is_file()]
-    total = sum(path.stat().st_size for path in files)
+    sqlite_logs = [path for path in codex_home.glob("logs_2.sqlite*") if path.is_file()]
+    tui_log = codex_home / "log" / "codex-tui.log"
+    files = sqlite_logs + ([tui_log] if tui_log.is_file() else [])
+    sqlite_total = sum(path.stat().st_size for path in sqlite_logs)
+    tui_total = tui_log.stat().st_size if tui_log.is_file() else 0
+    total = sqlite_total + tui_total
     report(f"logs_mb {mb(total)}")
+    report(f"logs_2_sqlite_mb {mb(sqlite_total)}")
+    report(f"codex_tui_log_mb {mb(tui_total)}")
     if total < threshold_mb * 1024 * 1024:
         report("logs_rotate skipped_below_threshold")
         return
@@ -436,7 +442,8 @@ def rotate_logs(codex_home: Path, threshold_mb: int, stamp: str, apply: bool) ->
         archive_root = codex_home / "archived_logs" / f"keep-codex-fast-{stamp}"
         archive_root.mkdir(parents=True, exist_ok=True)
         for path in files:
-            shutil.move(str(path), str(archive_root / path.name))
+            dest_name = "codex-tui.log" if path == tui_log else path.name
+            shutil.move(str(path), str(archive_root / dest_name))
         report(f"logs_archive_root {archive_root}")
 
 
@@ -579,7 +586,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--backup-root", help="Override backup output folder.")
     parser.add_argument("--archive-older-than-days", type=int, default=10)
     parser.add_argument("--worktree-older-than-days", type=int, default=7)
-    parser.add_argument("--rotate-logs-above-mb", type=int, default=64)
+    parser.add_argument(
+        "--rotate-logs-above-mb",
+        type=int,
+        default=64,
+        help="Archive logs_2.sqlite* and log/codex-tui.log when their combined size is at least this many MB.",
+    )
     args = parser.parse_args(argv)
     if args.apply and args.backup_only:
         parser.error("--apply and --backup-only cannot be used together")

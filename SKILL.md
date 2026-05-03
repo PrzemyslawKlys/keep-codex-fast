@@ -74,7 +74,7 @@ If the user wants automation and the Codex app automation tool is available, cre
 - Normalizes Windows extended paths like `\\?\C:\...` inside local SQLite text fields.
 - Prunes missing/temp project blocks from `config.toml` and writes UTF-8 without BOM.
 - Moves stale worktrees to `~/.codex/archived_worktrees/`.
-- Rotates `logs_2.sqlite*` into `~/.codex/archived_logs/` only when above the threshold.
+- Rotates `logs_2.sqlite*` and `log/codex-tui.log` into `~/.codex/archived_logs/` only when above the threshold.
 - Reports heavy Node processes without killing them.
 
 Report mode does none of those mutations. It only prints counts and pseudonymous candidates. Use `--details` when raw IDs, titles, or paths are needed for diagnosis.

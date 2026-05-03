@@ -170,7 +170,7 @@ The skill can safely handle:
 
 - old non-pinned active sessions
 - stale worktrees
-- large `logs_2.sqlite*` files
+- large `logs_2.sqlite*` and `log/codex-tui.log` files
 - dead/temp project entries in `config.toml`
 - Windows `\\?\C:\...` path mismatches in local SQLite text fields
 
