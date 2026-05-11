@@ -112,7 +112,7 @@ The script reports title and preview payload size in report mode and normal appl
 python scripts/keep_codex_fast.py --apply --repair-thread-metadata-bloat
 ```
 
-With that flag, after backing up and only when Codex is not running, it trims active SQLite title/preview metadata to bounded display values. It also appends repaired titles to `session_index.jsonl`, which matches current Codex name-update storage.
+With that flag, after backing up and only when Codex is not running, it trims active SQLite title/preview metadata to bounded display values. If a thread already has a friendly name in `session_index.jsonl`, the repair preserves that name instead of replacing it with a shortened prompt.
 
 This does not remove the actual conversation transcript. The full rollout JSONL remains available unless you separately archive the session.
 

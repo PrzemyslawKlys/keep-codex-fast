@@ -255,6 +255,35 @@ def append_session_index_name(codex_home: Path, thread_id: str, name: str) -> No
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+def latest_session_index_name(codex_home: Path, thread_id: str) -> str | None:
+    path = codex_home / "session_index.jsonl"
+    if not path.exists():
+        return None
+    latest = None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("id") == thread_id and record.get("thread_name"):
+            latest = str(record["thread_name"])
+    return latest
+
+
+def should_append_repaired_session_index_name(
+    codex_home: Path,
+    item: ThreadMetadataRepair,
+) -> bool:
+    if not item.new_title or item.new_title == item.old_title:
+        return False
+    existing_name = latest_session_index_name(codex_home, item.thread_id)
+    return existing_name is None or existing_name == item.old_title
+
+
 def report_thread_metadata_bloat(
     conn: sqlite3.Connection,
     *,
@@ -411,7 +440,7 @@ def repair_thread_metadata_bloat(
                 "update threads set title=? where id=?",
                 (item.new_title, item.thread_id),
             )
-        if item.new_title and item.new_title != item.old_title:
+        if should_append_repaired_session_index_name(codex_home, item):
             append_session_index_name(codex_home, item.thread_id, item.new_title)
     report("thread_metadata_repair applied")
     report(f"thread_metadata_repair_manifest {manifest}")
