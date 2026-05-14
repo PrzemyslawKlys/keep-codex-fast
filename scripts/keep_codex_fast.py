@@ -284,6 +284,13 @@ def should_append_repaired_session_index_name(
     return existing_name is None or existing_name == item.old_title
 
 
+def repaired_thread_title(codex_home: Path, thread_id: str, old_title: str, title_limit: int) -> str:
+    existing_name = latest_session_index_name(codex_home, thread_id)
+    if existing_name:
+        return bounded_text(existing_name, title_limit)
+    return bounded_text(old_title, title_limit)
+
+
 def report_thread_metadata_bloat(
     conn: sqlite3.Connection,
     *,
@@ -372,24 +379,20 @@ def repair_thread_metadata_bloat(
         select id, title, {select_preview}
         from threads
         where {archived_expr}
-          and (
-            length(title) > ?
-            {"or length(first_user_message) > ?" if has_preview else ""}
-          )
-        """,
-        (title_limit, preview_limit) if has_preview else (title_limit,),
+        """
     ).fetchall()
 
     repairs: list[ThreadMetadataRepair] = []
     for thread_id, title, preview in rows:
+        thread_id = str(thread_id)
         old_title = title or ""
         old_preview = preview or ""
-        new_title = bounded_text(old_title, title_limit)
+        new_title = repaired_thread_title(codex_home, thread_id, old_title, title_limit)
         new_preview = bounded_text(old_preview, preview_limit) if has_preview else ""
         if new_title != old_title or new_preview != old_preview:
             repairs.append(
                 ThreadMetadataRepair(
-                    str(thread_id),
+                    thread_id,
                     old_title,
                     new_title,
                     old_preview,

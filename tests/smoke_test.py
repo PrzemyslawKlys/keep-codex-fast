@@ -230,7 +230,7 @@ def assert_apply_mode(module) -> None:
         assert archived_at is not None
         assert "archived_sessions" in rollout_path
         assert cwd == r"C:\DefinitelyMissingKeepCodexFast"
-        assert len(title) <= 120
+        assert title == "Friendly Agent"
         assert len(preview) <= 240
         assert not paths["rollout"].exists()
         assert not paths["worktree"].exists()
@@ -268,6 +268,45 @@ def assert_repair_adds_bounded_name_when_no_existing_name(module) -> None:
         name = latest_session_index_name(paths["codex_home"], "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
         assert name is not None
         assert len(name) <= 120
+
+
+def assert_repair_restores_existing_name_when_title_is_already_bounded(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_fake_home(Path(td))
+        backup = Path(td) / "backup-repair-existing-name"
+        conn = sqlite3.connect(paths["state_db"])
+        conn.execute(
+            "update threads set title=?, first_user_message=? where id=?",
+            ("Short prompt fallback", "Short preview", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        )
+        conn.commit()
+        conn.close()
+        (paths["codex_home"] / "session_index.jsonl").write_text(
+            '{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","thread_name":"Friendly Agent","updated_at":"2026-01-01T00:00:00.000Z"}\n',
+            encoding="utf-8",
+        )
+        args = argparse.Namespace(
+            apply=True,
+            backup_only=False,
+            details=False,
+            wait_for_codex_exit=False,
+            codex_home=str(paths["codex_home"]),
+            backup_root=str(backup),
+            archive_older_than_days=10,
+            worktree_older_than_days=7,
+            rotate_logs_above_mb=64,
+            thread_title_limit=120,
+            thread_preview_limit=240,
+            repair_thread_metadata_bloat=True,
+        )
+        assert module.run(args) == 0
+        conn = sqlite3.connect(paths["state_db"])
+        title = conn.execute(
+            "select title from threads where id=?",
+            ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",),
+        ).fetchone()[0]
+        conn.close()
+        assert title == "Friendly Agent"
 
 
 def assert_normal_apply_does_not_repair_thread_metadata(module) -> None:
@@ -310,6 +349,7 @@ def main() -> int:
     assert_session_alias_detection(module)
     assert_normal_apply_does_not_repair_thread_metadata(module)
     assert_repair_adds_bounded_name_when_no_existing_name(module)
+    assert_repair_restores_existing_name_when_title_is_already_bounded(module)
     assert_apply_mode(module)
     print("smoke tests passed")
     return 0
