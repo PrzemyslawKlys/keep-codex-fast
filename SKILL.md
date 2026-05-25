@@ -102,7 +102,7 @@ If the user wants automation and the Codex app automation tool is available, cre
 - Archives old non-pinned sessions to `~/.codex/archived_sessions/`.
 - Uses `updated_at` for age-based session archiving by default, or `created_at` with `--archive-age-field created_at`.
 - Supports targeted session archiving with `--archive-thread-id` or `--archive-rollout-path`, still backup-first and archive-only.
-- Normalizes Windows extended paths like `\\?\C:\...` inside local SQLite text fields.
+- Normalizes Windows extended paths like `\\?\C:\...` inside local SQLite text fields and selected metadata files such as `config.toml`.
 - Prunes missing/temp project blocks from `config.toml` and writes UTF-8 without BOM.
 - Moves stale worktrees to `~/.codex/archived_worktrees/`.
 - Rotates `logs_2.sqlite*` and `log/codex-tui.log` into `~/.codex/archived_logs/` only when above the threshold.

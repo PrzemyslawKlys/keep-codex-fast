@@ -243,7 +243,7 @@ The skill can safely handle:
 - stale worktrees
 - large `logs_2.sqlite*` and `log/codex-tui.log` files
 - dead/temp project entries in `config.toml`
-- Windows `\\?\C:\...` path mismatches in local SQLite text fields
+- Windows `\\?\C:\...` path mismatches in local SQLite text fields and selected metadata files such as `config.toml`
 - oversized thread title and first-message preview metadata in `state_5.sqlite`, only with `--repair-thread-metadata-bloat`
 - malformed no-user-event local task sessions, only with `--archive-malformed-local-tasks`
 
