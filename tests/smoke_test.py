@@ -42,7 +42,10 @@ def make_fake_home(root: Path) -> dict[str, Path]:
 
     (codex_home / ".codex-global-state.json").write_text('{"pinned-thread-ids":[]}', encoding="utf-8")
     (codex_home / "config.toml").write_text(
-        '[projects."C:\\\\DefinitelyMissingKeepCodexFast"]\ntrust_level = "trusted"\n',
+        '[projects."C:\\\\DefinitelyMissingKeepCodexFast"]\n'
+        'trust_level = "trusted"\n'
+        '[plugins.keep-codex-fast]\n'
+        r"source = '\\?\C:\Users\Tester\.codex\skills\keep-codex-fast'" + "\n",
         encoding="utf-8",
     )
 
@@ -356,6 +359,60 @@ def assert_extended_rollout_path_detection(module) -> None:
 
         assert len(candidates) == 1
         assert candidates[0].source == paths["rollout"]
+
+
+def assert_extended_path_normalization_catches_embedded_text_and_config(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_fake_home(Path(td))
+        backup = Path(td) / "backup-normalize"
+        extended_rollout = "\\\\?\\" + str(paths["rollout"])
+        embedded_preview = r"resume active '\\?\C:\Users\Tester\.codex\sessions\rollout.jsonl'"
+        conn = sqlite3.connect(paths["state_db"])
+        conn.execute(
+            "update threads set rollout_path=?, first_user_message=? where id=?",
+            (extended_rollout, embedded_preview, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        )
+        conn.commit()
+        conn.close()
+
+        args = argparse.Namespace(
+            apply=True,
+            backup_only=False,
+            details=False,
+            wait_for_codex_exit=False,
+            codex_home=str(paths["codex_home"]),
+            backup_root=str(backup),
+            archive_older_than_days=9999,
+            archive_age_field="updated_at",
+            archive_thread_id=[],
+            archive_rollout_path=[],
+            worktree_older_than_days=9999,
+            rotate_logs_above_mb=64,
+            thread_title_limit=120,
+            thread_preview_limit=240,
+            repair_thread_metadata_bloat=False,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert module.run(args) == 0
+        text = output.getvalue()
+        assert "extended_paths threads.first_user_message 1" in text
+        assert "extended_paths threads.rollout_path 1" in text
+        assert "extended_paths threads.cwd 1" in text
+        assert "extended_paths_file config.toml 1" in text
+
+        conn = sqlite3.connect(paths["state_db"])
+        rollout_path, cwd, preview = conn.execute(
+            "select rollout_path, cwd, first_user_message from threads where id=?",
+            ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",),
+        ).fetchone()
+        conn.close()
+        assert "\\\\?\\" not in rollout_path
+        assert "\\\\?\\" not in cwd
+        assert "\\\\?\\" not in preview
+        config = (paths["codex_home"] / "config.toml").read_text(encoding="utf-8")
+        assert "\\\\?\\" not in config
+        assert r"C:\Users\Tester\.codex\skills\keep-codex-fast" in config
 
 
 def assert_created_at_archive_field(module) -> None:
@@ -758,6 +815,7 @@ def main() -> int:
     assert_backup_only_mode(module)
     assert_session_alias_detection(module)
     assert_extended_rollout_path_detection(module)
+    assert_extended_path_normalization_catches_embedded_text_and_config(module)
     assert_created_at_archive_field(module)
     assert_targeted_session_archive(module)
     assert_normal_apply_does_not_repair_thread_metadata(module)

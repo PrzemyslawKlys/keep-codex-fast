@@ -41,6 +41,11 @@ TEMP_LOCAL_TASK_CWD_RE = re.compile(
 )
 DEFAULT_TITLE_LIMIT = 120
 DEFAULT_PREVIEW_LIMIT = 240
+NORMALIZE_TEXT_FILES = [
+    "config.toml",
+    "session_index.jsonl",
+    "models_cache.json",
+]
 
 
 @dataclass
@@ -248,6 +253,10 @@ def normalize_extended_path(value: str) -> str:
     if value.startswith("\\\\?\\"):
         return value[4:]
     return value
+
+
+def normalize_extended_paths_in_text(value: str) -> str:
+    return value.replace("\\\\?\\UNC\\", "\\\\").replace("\\\\?\\", "")
 
 
 def normalized_path(value: str) -> Path:
@@ -532,23 +541,50 @@ def normalize_sqlite_paths(conn: sqlite3.Connection, apply: bool) -> int:
         text_cols = [col[1] for col in cols if "TEXT" in (col[2] or "").upper() or col[2] == ""]
         for col in text_cols:
             rows = cur.execute(
-                f'select rowid, "{col}" from "{table}" where "{col}" like ?',
-                ("\\\\?\\%",),
+                f'select rowid, "{col}" from "{table}" where instr("{col}", ?) > 0',
+                ("\\\\?\\",),
             ).fetchall()
             changed = 0
             for rowid, value in rows:
-                if isinstance(value, str) and value.startswith("\\\\?\\"):
+                if isinstance(value, str):
+                    normalized = normalize_extended_paths_in_text(value)
+                else:
+                    normalized = value
+                if normalized != value:
                     changed += 1
                     if apply:
                         cur.execute(
                             f'update "{table}" set "{col}"=? where rowid=?',
-                            (normalize_extended_path(value), rowid),
+                            (normalized, rowid),
                         )
             if changed:
                 report(f"extended_paths {table}.{col} {changed}")
                 total += changed
     if total == 0:
         report("extended_paths 0")
+    return total
+
+
+def normalize_metadata_text_paths(codex_home: Path, apply: bool) -> int:
+    total = 0
+    for name in NORMALIZE_TEXT_FILES:
+        path = codex_home / name
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            continue
+        normalized = normalize_extended_paths_in_text(text)
+        if normalized == text:
+            continue
+        count = text.count("\\\\?\\")
+        total += count
+        report(f"extended_paths_file {name} {count}")
+        if apply:
+            path.write_text(normalized, encoding="utf-8")
+    if total == 0:
+        report("extended_paths_file 0")
     return total
 
 
@@ -1098,6 +1134,7 @@ def run(args: argparse.Namespace) -> int:
     else:
         report("state_db_missing")
 
+    normalize_metadata_text_paths(codex_home, effective_apply)
     prune_config(codex_home, backup_root, effective_apply, effective_backup)
     move_stale_worktrees(codex_home, backup_root, args.worktree_older_than_days, stamp, effective_apply)
     rotate_logs(codex_home, args.rotate_logs_above_mb, stamp, effective_apply)
