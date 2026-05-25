@@ -30,6 +30,17 @@ TEMP_PROJECT_RE = re.compile(
     r"(\\AppData\\Local\\Temp\\|/AppData/Local/Temp/|\\Temp\\codex-|/Temp/codex-|\\Temp\\spark-|/Temp/spark-)",
     re.I,
 )
+TEMP_LOCAL_TASK_CWD_RE = re.compile(
+    r"("
+    r"^/(?:private/)?var/folders/.+/T$"
+    r"|^/(?:tmp|var/tmp)(?:/|$)"
+    r"|^[A-Z]:\\Users\\[^\\]+\\AppData\\Local\\Temp(?:\\|$)"
+    r"|^\\\\\?\\[A-Z]:\\Users\\[^\\]+\\AppData\\Local\\Temp(?:\\|$)"
+    r")",
+    re.I,
+)
+DEFAULT_TITLE_LIMIT = 120
+DEFAULT_PREVIEW_LIMIT = 240
 
 
 @dataclass
@@ -39,7 +50,30 @@ class SessionCandidate:
     title: str
     source: Path
     relative: Path
+    created_at: int | None
     updated_at: int | None
+    reason: str
+
+
+@dataclass
+class MalformedLocalTaskCandidate:
+    size: int
+    thread_id: str
+    title: str
+    cwd: str
+    reason: str
+    source: Path
+    relative: Path
+    updated_at: int | None
+
+
+@dataclass
+class ThreadMetadataRepair:
+    thread_id: str
+    old_title: str
+    new_title: str
+    old_preview: str
+    new_preview: str
 
 
 def now_stamp() -> str:
@@ -212,6 +246,274 @@ def normalize_extended_path(value: str) -> str:
     return value
 
 
+def normalized_path(value: str) -> Path:
+    return Path(normalize_extended_path(value))
+
+
+def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {row[1] for row in conn.execute(f'pragma table_info("{table}")').fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
+def has_threads_columns(conn: sqlite3.Connection, required: set[str]) -> bool:
+    return required.issubset(table_columns(conn, "threads"))
+
+
+def active_unarchived_expr(columns: set[str]) -> str:
+    return "COALESCE(archived,0)=0" if "archived" in columns else "archived_at is null"
+
+
+def bounded_text(value: str, limit: int) -> str:
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: limit - 3].rstrip() + "..."
+
+
+def append_session_index_name(codex_home: Path, thread_id: str, name: str) -> None:
+    path = codex_home / "session_index.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "id": thread_id,
+        "thread_name": name,
+        "updated_at": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def latest_session_index_name(codex_home: Path, thread_id: str) -> str | None:
+    path = codex_home / "session_index.jsonl"
+    if not path.exists():
+        return None
+    latest = None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("id") == thread_id and record.get("thread_name"):
+            latest = str(record["thread_name"])
+    return latest
+
+
+def should_append_repaired_session_index_name(
+    codex_home: Path,
+    item: ThreadMetadataRepair,
+) -> bool:
+    if not item.new_title or item.new_title == item.old_title:
+        return False
+    existing_name = latest_session_index_name(codex_home, item.thread_id)
+    return existing_name is None or existing_name == item.old_title
+
+
+def repaired_thread_title(codex_home: Path, thread_id: str, old_title: str, title_limit: int) -> str:
+    existing_name = latest_session_index_name(codex_home, thread_id)
+    if existing_name:
+        return bounded_text(existing_name, title_limit)
+    return bounded_text(old_title, title_limit)
+
+
+def report_thread_metadata_bloat(
+    conn: sqlite3.Connection,
+    *,
+    title_limit: int,
+    preview_limit: int,
+) -> None:
+    columns = table_columns(conn, "threads")
+    if not {"id", "title"}.issubset(columns):
+        report("thread_metadata_bloat skipped_missing_threads_columns")
+        return
+    archived_expr = active_unarchived_expr(columns)
+    preview_col = "first_user_message" if "first_user_message" in columns else None
+    if preview_col:
+        row = conn.execute(
+            f"""
+            select
+              count(*),
+              coalesce(sum(length(title)), 0),
+              coalesce(sum(length(first_user_message)), 0),
+              coalesce(max(length(title)), 0),
+              coalesce(max(length(first_user_message)), 0),
+              sum(case when length(title) > ? then 1 else 0 end),
+              sum(case when length(first_user_message) > ? then 1 else 0 end),
+              sum(case when length(first_user_message) > 10000 then 1 else 0 end)
+            from threads
+            where {archived_expr}
+            """,
+            (title_limit, preview_limit),
+        ).fetchone()
+        (
+            active_rows,
+            title_chars,
+            preview_chars,
+            max_title,
+            max_preview,
+            title_over_limit,
+            preview_over_limit,
+            preview_over_10k,
+        ) = row
+    else:
+        row = conn.execute(
+            f"""
+            select
+              count(*),
+              coalesce(sum(length(title)), 0),
+              coalesce(max(length(title)), 0),
+              sum(case when length(title) > ? then 1 else 0 end)
+            from threads
+            where {archived_expr}
+            """,
+            (title_limit,),
+        ).fetchone()
+        active_rows, title_chars, max_title, title_over_limit = row
+        preview_chars = max_preview = preview_over_limit = preview_over_10k = 0
+
+    report(f"thread_active_rows {active_rows}")
+    report(f"thread_title_chars {title_chars}")
+    report(f"thread_first_user_message_chars {preview_chars}")
+    report(f"thread_max_title_chars {max_title}")
+    report(f"thread_max_first_user_message_chars {max_preview}")
+    report(f"thread_titles_over_limit {title_over_limit or 0}")
+    report(f"thread_first_user_message_over_limit {preview_over_limit or 0}")
+    report(f"thread_first_user_message_over_10k {preview_over_10k or 0}")
+
+
+def repair_thread_metadata_bloat(
+    conn: sqlite3.Connection,
+    codex_home: Path,
+    backup_root: Path,
+    *,
+    apply: bool,
+    details: bool,
+    title_limit: int,
+    preview_limit: int,
+) -> None:
+    required = {"id", "title"}
+    if not has_threads_columns(conn, required):
+        report("thread_metadata_repair skipped_missing_threads_columns")
+        return
+    columns = table_columns(conn, "threads")
+    has_preview = "first_user_message" in columns
+    archived_expr = active_unarchived_expr(columns)
+    select_preview = "first_user_message" if has_preview else "''"
+    rows = conn.execute(
+        f"""
+        select id, title, {select_preview}
+        from threads
+        where {archived_expr}
+        """
+    ).fetchall()
+
+    repairs: list[ThreadMetadataRepair] = []
+    for thread_id, title, preview in rows:
+        thread_id = str(thread_id)
+        old_title = title or ""
+        old_preview = preview or ""
+        new_title = repaired_thread_title(codex_home, thread_id, old_title, title_limit)
+        new_preview = bounded_text(old_preview, preview_limit) if has_preview else ""
+        if new_title != old_title or new_preview != old_preview:
+            repairs.append(
+                ThreadMetadataRepair(
+                    thread_id,
+                    old_title,
+                    new_title,
+                    old_preview,
+                    new_preview,
+                )
+            )
+
+    report(f"thread_metadata_repair_candidates {len(repairs)}")
+    for index, item in enumerate(repairs[:10], start=1):
+        label = f"thread_{index:03d}"
+        title_delta = len(item.old_title) - len(item.new_title)
+        preview_delta = len(item.old_preview) - len(item.new_preview)
+        if details:
+            report(
+                f"thread_metadata_repair_candidate {label} thread_id={item.thread_id} "
+                f"title_delta={title_delta} preview_delta={preview_delta}"
+            )
+        else:
+            report(
+                f"thread_metadata_repair_candidate {label} "
+                f"title_delta={title_delta} preview_delta={preview_delta}"
+            )
+
+    if not apply or not repairs:
+        return
+
+    manifest = backup_root / "thread-metadata-repairs.jsonl"
+    with manifest.open("w", encoding="utf-8") as handle:
+        for item in repairs:
+            record = {
+                "thread_id": item.thread_id,
+                "old_title": item.old_title,
+                "new_title": item.new_title,
+                "old_first_user_message": item.old_preview,
+                "new_first_user_message": item.new_preview,
+            }
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    cur = conn.cursor()
+    for item in repairs:
+        if has_preview:
+            cur.execute(
+                "update threads set title=?, first_user_message=? where id=?",
+                (item.new_title, item.new_preview, item.thread_id),
+            )
+        else:
+            cur.execute(
+                "update threads set title=? where id=?",
+                (item.new_title, item.thread_id),
+            )
+        if should_append_repaired_session_index_name(codex_home, item):
+            append_session_index_name(codex_home, item.thread_id, item.new_title)
+    report("thread_metadata_repair applied")
+    report(f"thread_metadata_repair_manifest {manifest}")
+    write_thread_metadata_restore_script(manifest, codex_home / "state_5.sqlite", backup_root)
+
+
+def write_thread_metadata_restore_script(manifest: Path, state_db: Path, backup_root: Path) -> None:
+    restore = backup_root / "restore-thread-metadata.py"
+    restore.write_text(
+        f'''import json
+import sqlite3
+from pathlib import Path
+
+manifest = Path(r"{manifest}")
+db = Path(r"{state_db}")
+conn = sqlite3.connect(db)
+conn.execute("pragma busy_timeout=10000")
+cols = {{row[1] for row in conn.execute('pragma table_info("threads")').fetchall()}}
+has_preview = "first_user_message" in cols
+for line in manifest.read_text(encoding="utf-8").splitlines():
+    rec = json.loads(line)
+    if has_preview:
+        conn.execute(
+            "update threads set title=?, first_user_message=? where id=?",
+            (rec["old_title"], rec["old_first_user_message"], rec["thread_id"]),
+        )
+    else:
+        conn.execute(
+            "update threads set title=? where id=?",
+            (rec["old_title"], rec["thread_id"]),
+        )
+conn.commit()
+conn.close()
+''',
+        encoding="utf-8",
+    )
+    report(f"thread_metadata_restore_script {restore}")
+
+
 def normalize_sqlite_paths(conn: sqlite3.Connection, apply: bool) -> int:
     cur = conn.cursor()
     total = 0
@@ -250,21 +552,122 @@ def active_session_candidates(
     conn: sqlite3.Connection,
     codex_home: Path,
     archive_older_than_days: int,
+    archive_age_field: str,
+    archive_thread_ids: list[str],
+    archive_rollout_paths: list[str],
 ) -> list[SessionCandidate]:
     sessions_root = codex_home / "sessions"
     sessions_root_canonical = canonical_path(sessions_root)
-    cutoff = int((datetime.now() - timedelta(days=archive_older_than_days)).timestamp())
+    cutoff = int(time.time() - archive_older_than_days * 24 * 60 * 60)
     pinned = load_pinned(codex_home)
+    target_thread_ids = {value.lower() for value in archive_thread_ids}
+    target_rollout_paths = {str(canonical_path(Path(value))) for value in archive_rollout_paths}
+    columns = table_columns(conn, "threads")
+    created_at_expr = "created_at" if "created_at" in columns else "NULL"
+    active_expr = active_unarchived_expr(columns)
     rows = conn.execute(
-        "select id, title, rollout_path, updated_at from threads where archived_at is null"
+        f"select id, title, rollout_path, {created_at_expr}, updated_at from threads where {active_expr}"
     ).fetchall()
-    candidates: list[SessionCandidate] = []
-    for thread_id, title, rollout_path, updated_at in rows:
-        if thread_id in pinned or not rollout_path:
+    candidates_by_id: dict[str, SessionCandidate] = {}
+    found_thread_ids: set[str] = set()
+    found_rollout_paths: set[str] = set()
+    for thread_id, title, rollout_path, created_at, updated_at in rows:
+        thread_id = str(thread_id)
+        if not rollout_path:
             continue
+        source = normalized_path(rollout_path)
+        canonical_source = str(canonical_path(source))
+        targeted_by_thread = thread_id.lower() in target_thread_ids
+        targeted_by_path = canonical_source in target_rollout_paths
+        if targeted_by_thread:
+            found_thread_ids.add(thread_id.lower())
+        if targeted_by_path:
+            found_rollout_paths.add(canonical_source)
+        if thread_id in pinned:
+            if targeted_by_thread or targeted_by_path:
+                report(f"targeted_session_skipped_pinned thread_id={thread_id}")
+            continue
+        age_value = created_at if archive_age_field == "created_at" else updated_at
+        reason = f"{archive_age_field}_older_than_{archive_older_than_days}d"
         if updated_at is not None and int(updated_at) >= cutoff:
+            if not targeted_by_thread and not targeted_by_path and archive_age_field == "updated_at":
+                continue
+        if age_value is not None and int(age_value) >= cutoff and not targeted_by_thread and not targeted_by_path:
             continue
-        source = Path(rollout_path)
+        if targeted_by_thread:
+            reason = "target_thread_id"
+        elif targeted_by_path:
+            reason = "target_rollout_path"
+        if not source.exists():
+            if targeted_by_thread or targeted_by_path:
+                report(f"targeted_session_skipped_missing_rollout thread_id={thread_id}")
+            continue
+        try:
+            relative = canonical_path(source).relative_to(sessions_root_canonical)
+        except ValueError:
+            if targeted_by_thread or targeted_by_path:
+                report(f"targeted_session_skipped_outside_sessions thread_id={thread_id}")
+            continue
+        candidates_by_id[thread_id] = SessionCandidate(
+            source.stat().st_size,
+            thread_id,
+            title or "",
+            source,
+            relative,
+            created_at,
+            updated_at,
+            reason,
+        )
+    for target in sorted(target_thread_ids - found_thread_ids):
+        report(f"targeted_session_missing thread_id={target}")
+    for target in sorted(target_rollout_paths - found_rollout_paths):
+        report(f"targeted_session_missing rollout_path={target}")
+    candidates = list(candidates_by_id.values())
+    candidates.sort(key=lambda item: item.size, reverse=True)
+    return candidates
+
+
+def malformed_local_task_reason(cwd: str) -> str | None:
+    if cwd == "/":
+        return "root_cwd"
+    if TEMP_LOCAL_TASK_CWD_RE.search(cwd):
+        return "temp_cwd"
+    return None
+
+
+def malformed_local_task_candidates(
+    conn: sqlite3.Connection,
+    codex_home: Path,
+) -> list[MalformedLocalTaskCandidate]:
+    columns = table_columns(conn, "threads")
+    required = {"id", "title", "rollout_path", "cwd", "updated_at", "has_user_event"}
+    missing = required - columns
+    if missing:
+        report(f"malformed_local_task_skipped_missing_columns {','.join(sorted(missing))}")
+        return []
+
+    sessions_root = codex_home / "sessions"
+    sessions_root_canonical = canonical_path(sessions_root)
+    pinned = load_pinned(codex_home)
+    active_expr = active_unarchived_expr(columns)
+    rows = conn.execute(
+        f"""
+        select id, title, rollout_path, cwd, updated_at
+        from threads
+        where {active_expr}
+          and COALESCE(has_user_event,0)=0
+          and rollout_path <> ''
+        """
+    ).fetchall()
+
+    candidates: list[MalformedLocalTaskCandidate] = []
+    for thread_id, title, rollout_path, cwd, updated_at in rows:
+        if thread_id in pinned:
+            continue
+        reason = malformed_local_task_reason(cwd or "")
+        if reason is None:
+            continue
+        source = normalized_path(rollout_path)
         if not source.exists():
             continue
         try:
@@ -272,10 +675,39 @@ def active_session_candidates(
         except ValueError:
             continue
         candidates.append(
-            SessionCandidate(source.stat().st_size, thread_id, title or "", source, relative, updated_at)
+            MalformedLocalTaskCandidate(
+                source.stat().st_size,
+                thread_id,
+                title or "",
+                cwd or "",
+                reason,
+                source,
+                relative,
+                updated_at,
+            )
         )
     candidates.sort(key=lambda item: item.size, reverse=True)
     return candidates
+
+
+def archive_thread_row(
+    cur: sqlite3.Cursor,
+    columns: set[str],
+    *,
+    rollout_path: str,
+    archived_at: int,
+    thread_id: str,
+) -> None:
+    if "archived" in columns:
+        cur.execute(
+            "update threads set rollout_path=?, archived=1, archived_at=? where id=?",
+            (rollout_path, archived_at, thread_id),
+        )
+    else:
+        cur.execute(
+            "update threads set rollout_path=?, archived_at=? where id=?",
+            (rollout_path, archived_at, thread_id),
+        )
 
 
 def archive_sessions(
@@ -293,7 +725,10 @@ def archive_sessions(
     for index, item in enumerate(candidates[:10], start=1):
         label = f"session_{index:03d}"
         if details:
-            report(f"large_session_mb {mb(item.size)} {label} thread_id={item.thread_id} title={item.title[:70]}")
+            report(
+                f"large_session_mb {mb(item.size)} {label} thread_id={item.thread_id} "
+                f"reason={item.reason} title={item.title[:70]}"
+            )
         else:
             report(f"large_session_mb {mb(item.size)} {label}")
     if not apply or not candidates:
@@ -304,6 +739,7 @@ def archive_sessions(
     archive_root.mkdir(parents=True, exist_ok=True)
     now = int(time.time())
     cur = conn.cursor()
+    columns = table_columns(conn, "threads")
     with manifest.open("w", encoding="utf-8") as handle:
         for item in candidates:
             dest = archive_root / item.relative
@@ -314,19 +750,84 @@ def archive_sessions(
                 "bytes": item.size,
                 "from": str(item.source),
                 "to": str(dest),
+                "reason": item.reason,
+                "created_at": item.created_at,
+                "updated_at": item.updated_at,
             }
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-            cur.execute(
-                "update threads set rollout_path=?, archived=1, archived_at=? where id=?",
-                (str(dest), now, item.thread_id),
-            )
+            archive_thread_row(cur, columns, rollout_path=str(dest), archived_at=now, thread_id=item.thread_id)
     write_session_restore_script(manifest, codex_home / "state_5.sqlite", backup_root)
     report(f"archived_sessions_root {archive_root}")
     report(f"archived_sessions_manifest {manifest}")
 
 
-def write_session_restore_script(manifest: Path, state_db: Path, backup_root: Path) -> None:
-    restore = backup_root / "restore-sessions.py"
+def archive_malformed_local_tasks(
+    conn: sqlite3.Connection,
+    candidates: list[MalformedLocalTaskCandidate],
+    codex_home: Path,
+    backup_root: Path,
+    stamp: str,
+    apply: bool,
+    details: bool,
+) -> None:
+    total = sum(item.size for item in candidates)
+    root_count = sum(1 for item in candidates if item.reason == "root_cwd")
+    temp_count = sum(1 for item in candidates if item.reason == "temp_cwd")
+    report(f"malformed_local_task_candidates {len(candidates)}")
+    report(f"malformed_local_task_candidate_gb {gb(total)}")
+    report(f"malformed_local_task_root_cwd {root_count}")
+    report(f"malformed_local_task_temp_cwd {temp_count}")
+    for index, item in enumerate(candidates[:10], start=1):
+        label = f"malformed_task_{index:03d}"
+        if details:
+            report(
+                f"malformed_local_task_candidate {label} thread_id={item.thread_id} "
+                f"reason={item.reason} cwd={item.cwd} title={item.title[:70]}"
+            )
+        else:
+            report(f"malformed_local_task_candidate {label} reason={item.reason}")
+    if not apply or not candidates:
+        return
+
+    archive_root = codex_home / "archived_sessions" / f"malformed-local-tasks-{stamp}"
+    manifest = backup_root / "moved-malformed-local-tasks.jsonl"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    now = int(time.time())
+    cur = conn.cursor()
+    columns = table_columns(conn, "threads")
+    with manifest.open("w", encoding="utf-8") as handle:
+        for item in candidates:
+            dest = archive_root / item.relative
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(item.source), str(dest))
+            record = {
+                "thread_id": item.thread_id,
+                "bytes": item.size,
+                "reason": item.reason,
+                "cwd": item.cwd,
+                "from": str(item.source),
+                "to": str(dest),
+            }
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            archive_thread_row(cur, columns, rollout_path=str(dest), archived_at=now, thread_id=item.thread_id)
+    write_session_restore_script(
+        manifest,
+        codex_home / "state_5.sqlite",
+        backup_root,
+        restore_name="restore-malformed-local-tasks.py",
+    )
+    report(f"malformed_local_task_archive_root {archive_root}")
+    report(f"malformed_local_task_manifest {manifest}")
+
+
+def write_session_restore_script(
+    manifest: Path,
+    state_db: Path,
+    backup_root: Path,
+    *,
+    restore_name: str = "restore-sessions.py",
+) -> None:
+    restore = backup_root / restore_name
     restore.write_text(
         f'''import json
 import shutil
@@ -337,6 +838,7 @@ manifest = Path(r"{manifest}")
 db = Path(r"{state_db}")
 conn = sqlite3.connect(db)
 conn.execute("pragma busy_timeout=10000")
+columns = {{row[1] for row in conn.execute('pragma table_info("threads")')}}
 for line in manifest.read_text(encoding="utf-8").splitlines():
     rec = json.loads(line)
     src = Path(rec["to"])
@@ -345,10 +847,16 @@ for line in manifest.read_text(encoding="utf-8").splitlines():
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dest))
     if rec.get("thread_id"):
-        conn.execute(
-            "update threads set rollout_path=?, archived=0, archived_at=NULL where id=?",
-            (str(dest), rec["thread_id"]),
-        )
+        if "archived" in columns:
+            conn.execute(
+                "update threads set rollout_path=?, archived=0, archived_at=NULL where id=?",
+                (str(dest), rec["thread_id"]),
+            )
+        else:
+            conn.execute(
+                "update threads set rollout_path=?, archived_at=NULL where id=?",
+                (str(dest), rec["thread_id"]),
+            )
 conn.commit()
 conn.close()
 ''',
@@ -422,9 +930,15 @@ def move_stale_worktrees(codex_home: Path, backup_root: Path, days: int, stamp: 
 
 
 def rotate_logs(codex_home: Path, threshold_mb: int, stamp: str, apply: bool) -> None:
-    files = [path for path in codex_home.glob("logs_2.sqlite*") if path.is_file()]
-    total = sum(path.stat().st_size for path in files)
+    sqlite_logs = [path for path in codex_home.glob("logs_2.sqlite*") if path.is_file()]
+    tui_log = codex_home / "log" / "codex-tui.log"
+    files = sqlite_logs + ([tui_log] if tui_log.is_file() else [])
+    sqlite_total = sum(path.stat().st_size for path in sqlite_logs)
+    tui_total = tui_log.stat().st_size if tui_log.is_file() else 0
+    total = sqlite_total + tui_total
     report(f"logs_mb {mb(total)}")
+    report(f"logs_2_sqlite_mb {mb(sqlite_total)}")
+    report(f"codex_tui_log_mb {mb(tui_total)}")
     if total < threshold_mb * 1024 * 1024:
         report("logs_rotate skipped_below_threshold")
         return
@@ -432,7 +946,8 @@ def rotate_logs(codex_home: Path, threshold_mb: int, stamp: str, apply: bool) ->
         archive_root = codex_home / "archived_logs" / f"keep-codex-fast-{stamp}"
         archive_root.mkdir(parents=True, exist_ok=True)
         for path in files:
-            shutil.move(str(path), str(archive_root / path.name))
+            dest_name = "codex-tui.log" if path == tui_log else path.name
+            shutil.move(str(path), str(archive_root / dest_name))
         report(f"logs_archive_root {archive_root}")
 
 
@@ -530,7 +1045,40 @@ def run(args: argparse.Namespace) -> int:
         conn = sqlite_connect(state_db, readonly=not effective_apply)
         conn.execute("pragma busy_timeout=10000")
         normalize_sqlite_paths(conn, effective_apply)
-        candidates = active_session_candidates(conn, codex_home, args.archive_older_than_days)
+        report_thread_metadata_bloat(
+            conn,
+            title_limit=args.thread_title_limit,
+            preview_limit=args.thread_preview_limit,
+        )
+        repair_thread_metadata_bloat(
+            conn,
+            codex_home,
+            backup_root,
+            apply=effective_apply and args.repair_thread_metadata_bloat,
+            details=args.details,
+            title_limit=args.thread_title_limit,
+            preview_limit=args.thread_preview_limit,
+        )
+        malformed_candidates = malformed_local_task_candidates(conn, codex_home)
+        archive_malformed_local_tasks(
+            conn,
+            malformed_candidates,
+            codex_home,
+            backup_root,
+            stamp,
+            effective_apply and getattr(args, "archive_malformed_local_tasks", False),
+            args.details,
+        )
+        if effective_apply and malformed_candidates and not getattr(args, "archive_malformed_local_tasks", False):
+            report("malformed_local_task_archive skipped_flag_required")
+        candidates = active_session_candidates(
+            conn,
+            codex_home,
+            args.archive_older_than_days,
+            args.archive_age_field,
+            args.archive_thread_id,
+            args.archive_rollout_path,
+        )
         archive_sessions(conn, candidates, codex_home, backup_root, stamp, effective_apply, args.details)
         if effective_apply:
             conn.commit()
@@ -574,11 +1122,68 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--codex-home", help="Override Codex home. Defaults to CODEX_HOME or ~/.codex.")
     parser.add_argument("--backup-root", help="Override backup output folder.")
     parser.add_argument("--archive-older-than-days", type=int, default=10)
+    parser.add_argument(
+        "--archive-age-field",
+        choices=["updated_at", "created_at"],
+        default="updated_at",
+        help="Timestamp field used by --archive-older-than-days. Defaults to updated_at.",
+    )
+    parser.add_argument(
+        "--archive-thread-id",
+        action="append",
+        default=[],
+        help="Archive one active session by thread id, bypassing the age threshold. Can be repeated.",
+    )
+    parser.add_argument(
+        "--archive-rollout-path",
+        action="append",
+        default=[],
+        help="Archive one active session by rollout JSONL path, bypassing the age threshold. Can be repeated.",
+    )
     parser.add_argument("--worktree-older-than-days", type=int, default=7)
-    parser.add_argument("--rotate-logs-above-mb", type=int, default=64)
+    parser.add_argument(
+        "--rotate-logs-above-mb",
+        type=int,
+        default=64,
+        help="Archive logs_2.sqlite* and log/codex-tui.log when their combined size is at least this many MB.",
+    )
+    parser.add_argument(
+        "--thread-title-limit",
+        type=int,
+        default=DEFAULT_TITLE_LIMIT,
+        help="Title length threshold for metadata-bloat reporting and optional repair.",
+    )
+    parser.add_argument(
+        "--thread-preview-limit",
+        type=int,
+        default=DEFAULT_PREVIEW_LIMIT,
+        help="Preview length threshold for metadata-bloat reporting and optional repair.",
+    )
+    parser.add_argument(
+        "--repair-thread-metadata-bloat",
+        action="store_true",
+        help="With --apply, trim oversized thread title/preview metadata. Default --apply only reports candidates.",
+    )
+    parser.add_argument(
+        "--archive-malformed-local-tasks",
+        action="store_true",
+        help=(
+            "With --apply, archive active no-user-event local task sessions with suspicious cwd values "
+            "such as / or OS temp folders. Default --apply only reports candidates."
+        ),
+    )
     args = parser.parse_args(argv)
     if args.apply and args.backup_only:
         parser.error("--apply and --backup-only cannot be used together")
+    for thread_id in args.archive_thread_id:
+        if not THREAD_ID_RE.fullmatch(thread_id):
+            parser.error(f"--archive-thread-id must be a UUID-like thread id: {thread_id}")
+    if args.archive_older_than_days < 0:
+        parser.error("--archive-older-than-days must be non-negative")
+    if args.thread_title_limit < 20:
+        parser.error("--thread-title-limit must be at least 20")
+    if args.thread_preview_limit < args.thread_title_limit:
+        parser.error("--thread-preview-limit must be greater than or equal to --thread-title-limit")
     return args
 
 

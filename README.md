@@ -10,6 +10,13 @@ The rule is simple:
 
 > Make handoffs first. Archive, don't delete. Apply changes only when you are ready.
 
+## Three Modes
+
+- **Inspect:** report-only, no writes.
+- **Maintain:** normal apply; backs up, archives old sessions, moves stale worktrees, rotates logs, prunes dead config, and normalizes paths. It does not trim thread title/preview metadata.
+- **Optional repair:** only with `--apply --repair-thread-metadata-bloat`; shortens oversized SQLite display title/preview metadata after backup. The transcript stays intact.
+- **Optional malformed-task archive:** only with `--apply --archive-malformed-local-tasks`; archives active no-user-event local task sessions with suspicious workspace roots such as `/` or OS temp folders.
+
 ## Who This Is For
 
 Use this if Codex has started feeling slower after heavy use, especially if you:
@@ -30,24 +37,16 @@ It helps Codex:
 - create handoff docs before archiving old chats
 - back up important state before applying changes
 - archive old chats instead of deleting them
+- detect pathological thread title/preview metadata that can slow chat navigation
+- detect malformed active local-task sessions that can make Codex Desktop repeatedly log `No cwd found for local task`
 - move stale worktrees out of the hot path
 - rotate large logs
 - prune dead project references
 - report heavy Node/dev processes without killing them
 
-## Install
-
-Ask Codex:
-
-```text
-Install the keep-codex-fast skill from https://github.com/vibeforge1111/keep-codex-fast
-```
-
-Or clone/copy this folder into your Codex skills directory as `keep-codex-fast`.
-
 ## Quick Start
 
-After installing, ask Codex:
+Ask Codex:
 
 ```text
 Use $keep-codex-fast to inspect my Codex local state and recommend a safe maintenance plan.
@@ -105,6 +104,38 @@ Then back up first, archive instead of deleting, move stale worktrees, rotate la
 If Codex is currently running, do not mutate local state. Tell me to close Codex first.
 ```
 
+## Thread Title And Preview Bloat
+
+Some Codex builds can store a full first user prompt as both the thread title and the list preview. When those fields grow into hundreds of thousands of characters, thread navigation can become sluggish even before a large chat is opened.
+
+The script reports title and preview payload size in report mode and normal apply mode. It does not trim this metadata unless you explicitly opt in:
+
+```bash
+python scripts/keep_codex_fast.py --apply --repair-thread-metadata-bloat
+```
+
+With that flag, after backing up and only when Codex is not running, it trims active SQLite title/preview metadata to bounded display values. If a thread already has a friendly name in `session_index.jsonl`, the repair writes that name back into the SQLite display title instead of replacing it with a shortened prompt, including already-bounded prompt fallback titles from earlier repairs.
+
+This does not remove the actual conversation transcript. The full rollout JSONL remains available unless you separately archive the session.
+
+The repair manifest stores the old full title/preview values so you can restore them. Keep the backup folder private, especially `thread-metadata-repairs.jsonl` and `restore-thread-metadata.py`.
+
+If you are using the skill normally, this repair does not happen automatically. Treat it as an extra recommendation only when the report shows unusually large title/preview metadata.
+
+## Malformed Local Task Sessions
+
+Some app-server integrations can leave active local-task sessions that have no user event and point at a workspace root such as `/` or an OS temp directory. Codex Desktop may repeatedly try to resolve those sessions, log `No cwd found for local task`, and make the thread list sluggish.
+
+The script reports these candidates in report mode and normal apply mode. It does not archive them unless you explicitly opt in:
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-malformed-local-tasks
+```
+
+With that flag, after backing up and only when Codex is not running, it moves the matching rollout JSONL files into `~/.codex/archived_sessions/`, marks those threads archived in SQLite, and writes a restore manifest/script.
+
+This does not target normal chats. The archive predicate requires `has_user_event=0`, an active/unarchived thread, a suspicious `cwd`, and a rollout file under `~/.codex/sessions`.
+
 ## Weekly Or Biweekly Reminder
 
 Recurring maintenance should be a reminder, not an automatic apply.
@@ -127,6 +158,16 @@ The reminder should:
 - report heavy Node/dev processes without killing them
 - tell me that manual apply should only happen after I confirm handoffs exist or are not needed and Codex is closed
 ```
+
+## Install
+
+Ask Codex:
+
+```text
+Install the keep-codex-fast skill from https://github.com/vibeforge1111/keep-codex-fast
+```
+
+Or clone/copy this folder into your Codex skills directory as `keep-codex-fast`.
 
 ## Advanced: Manual Script Use
 
@@ -152,10 +193,40 @@ python scripts/keep_codex_fast.py --backup-only
 
 Backup folders can contain private local Codex metadata. Keep them on your machine, and do not publish or share them unless you have reviewed what is inside.
 
-Apply archive/maintenance actions:
+Apply core maintenance actions. This does not trim thread title/preview metadata:
 
 ```bash
 python scripts/keep_codex_fast.py --apply --archive-older-than-days 10 --worktree-older-than-days 7
+```
+
+By default, `--archive-older-than-days` uses the thread's last `updated_at` timestamp. If you created a handoff in an old chat and that recent update should not keep it active, use `created_at` instead:
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-older-than-days 10 --archive-age-field created_at
+```
+
+Archive one known session without changing the broad age policy:
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-thread-id 00000000-0000-0000-0000-000000000000
+```
+
+You can also target a rollout JSONL directly:
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-rollout-path /path/to/rollout.jsonl
+```
+
+Optionally repair oversized title/preview metadata only when the report recommends it:
+
+```bash
+python scripts/keep_codex_fast.py --apply --repair-thread-metadata-bloat
+```
+
+Optionally archive malformed no-user-event local tasks when the report recommends it:
+
+```bash
+python scripts/keep_codex_fast.py --apply --archive-malformed-local-tasks
 ```
 
 Wait for Codex to exit before applying:
@@ -170,9 +241,11 @@ The skill can safely handle:
 
 - old non-pinned active sessions
 - stale worktrees
-- large `logs_2.sqlite*` files
+- large `logs_2.sqlite*` and `log/codex-tui.log` files
 - dead/temp project entries in `config.toml`
 - Windows `\\?\C:\...` path mismatches in local SQLite text fields
+- oversized thread title and first-message preview metadata in `state_5.sqlite`, only with `--repair-thread-metadata-bloat`
+- malformed no-user-event local task sessions, only with `--archive-malformed-local-tasks`
 
 It does not permanently delete chats, logs, or worktrees. It moves them into archive folders and writes backup/restore artifacts before applying changes.
 
