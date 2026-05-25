@@ -558,12 +558,15 @@ def active_session_candidates(
 ) -> list[SessionCandidate]:
     sessions_root = codex_home / "sessions"
     sessions_root_canonical = canonical_path(sessions_root)
-    cutoff = int((datetime.now() - timedelta(days=archive_older_than_days)).timestamp())
+    cutoff = int(time.time() - archive_older_than_days * 24 * 60 * 60)
     pinned = load_pinned(codex_home)
     target_thread_ids = {value.lower() for value in archive_thread_ids}
     target_rollout_paths = {str(canonical_path(Path(value))) for value in archive_rollout_paths}
+    columns = table_columns(conn, "threads")
+    created_at_expr = "created_at" if "created_at" in columns else "NULL"
+    active_expr = active_unarchived_expr(columns)
     rows = conn.execute(
-        "select id, title, rollout_path, created_at, updated_at from threads where archived_at is null"
+        f"select id, title, rollout_path, {created_at_expr}, updated_at from threads where {active_expr}"
     ).fetchall()
     candidates_by_id: dict[str, SessionCandidate] = {}
     found_thread_ids: set[str] = set()
