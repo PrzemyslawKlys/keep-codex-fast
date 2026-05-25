@@ -52,6 +52,9 @@ def make_fake_home(root: Path) -> dict[str, Path]:
 
     log_file = codex_home / "logs_2.sqlite"
     log_file.write_text("log", encoding="utf-8")
+    tui_log_file = codex_home / "log" / "codex-tui.log"
+    tui_log_file.parent.mkdir(parents=True)
+    tui_log_file.write_text("tui log", encoding="utf-8")
 
     state_db = codex_home / "state_5.sqlite"
     conn = sqlite3.connect(state_db)
@@ -81,6 +84,7 @@ def make_fake_home(root: Path) -> dict[str, Path]:
         "rollout": rollout,
         "worktree": worktree,
         "log_file": log_file,
+        "tui_log_file": tui_log_file,
         "state_db": state_db,
     }
 
@@ -110,7 +114,9 @@ def assert_report_mode(module) -> None:
         assert paths["rollout"].exists(), "report mode must not move sessions"
         assert paths["worktree"].exists(), "report mode must not move worktrees"
         assert paths["log_file"].exists(), "report mode must not rotate logs"
+        assert paths["tui_log_file"].exists(), "report mode must not rotate TUI logs"
         assert not backup.exists(), "report mode must not create backup artifacts"
+        assert "codex_tui_log_mb" in text
         assert "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" not in text
         assert str(paths["codex_home"]) not in text
         conn = sqlite3.connect(paths["state_db"])
@@ -145,6 +151,7 @@ def assert_backup_only_mode(module) -> None:
         assert paths["rollout"].exists(), "backup-only mode must not move sessions"
         assert paths["worktree"].exists(), "backup-only mode must not move worktrees"
         assert paths["log_file"].exists(), "backup-only mode must not rotate logs"
+        assert paths["tui_log_file"].exists(), "backup-only mode must not rotate TUI logs"
         assert (backup / "state_5.sqlite").exists()
         assert (backup / "config.toml").exists()
         assert not (backup / "moved-sessions.jsonl").exists()
@@ -177,6 +184,31 @@ def assert_session_alias_detection(module) -> None:
         finally:
             conn.close()
         assert len(candidates) == 1
+
+
+def assert_extended_rollout_path_detection(module) -> None:
+    if os.name != "nt":
+        return
+
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_fake_home(Path(td))
+        extended_rollout = "\\\\?\\" + str(paths["rollout"])
+        conn = sqlite3.connect(paths["state_db"])
+        conn.execute(
+            "update threads set rollout_path=? where id=?",
+            (extended_rollout, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        )
+        conn.commit()
+        conn.close()
+
+        conn = module.sqlite_connect(paths["state_db"], readonly=True)
+        try:
+            candidates = module.active_session_candidates(conn, paths["codex_home"], 10)
+        finally:
+            conn.close()
+
+        assert len(candidates) == 1
+        assert candidates[0].source == paths["rollout"]
 
 
 def assert_apply_mode(module) -> None:
@@ -215,6 +247,8 @@ def assert_apply_mode(module) -> None:
         assert not paths["rollout"].exists()
         assert not paths["worktree"].exists()
         assert not paths["log_file"].exists()
+        assert not paths["tui_log_file"].exists()
+        assert list((paths["codex_home"] / "archived_logs").glob("keep-codex-fast-*/codex-tui.log"))
         assert "DefinitelyMissingKeepCodexFast" not in (paths["codex_home"] / "config.toml").read_text(
             encoding="utf-8"
         )
@@ -266,6 +300,7 @@ def main() -> int:
     assert_report_mode(module)
     assert_backup_only_mode(module)
     assert_session_alias_detection(module)
+    assert_extended_rollout_path_detection(module)
     assert_normal_apply_does_not_repair_thread_metadata(module)
     assert_apply_mode(module)
     print("smoke tests passed")

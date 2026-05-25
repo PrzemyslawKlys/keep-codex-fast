@@ -83,7 +83,7 @@ If the user wants automation and the Codex app automation tool is available, cre
 - Normalizes Windows extended paths like `\\?\C:\...` inside local SQLite text fields.
 - Prunes missing/temp project blocks from `config.toml` and writes UTF-8 without BOM.
 - Moves stale worktrees to `~/.codex/archived_worktrees/`.
-- Rotates `logs_2.sqlite*` into `~/.codex/archived_logs/` only when above the threshold.
+- Rotates `logs_2.sqlite*` and `log/codex-tui.log` into `~/.codex/archived_logs/` only when above the threshold.
 - Reports heavy Node processes without killing them.
 - Reports pathological active thread titles and `first_user_message` previews. It only repairs them when the user explicitly opts in with `--repair-thread-metadata-bloat`.
 
