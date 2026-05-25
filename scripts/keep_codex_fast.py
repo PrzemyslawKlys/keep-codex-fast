@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 
@@ -78,6 +78,10 @@ class ThreadMetadataRepair:
 
 def now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def utc_now_z() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def codex_home_from_args(value: str | None) -> Path:
@@ -280,7 +284,7 @@ def append_session_index_name(codex_home: Path, thread_id: str, name: str) -> No
     entry = {
         "id": thread_id,
         "thread_name": name,
-        "updated_at": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+        "updated_at": utc_now_z(),
     }
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
