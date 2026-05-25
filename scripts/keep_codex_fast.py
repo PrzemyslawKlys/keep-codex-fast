@@ -43,9 +43,8 @@ DEFAULT_TITLE_LIMIT = 120
 DEFAULT_PREVIEW_LIMIT = 240
 NORMALIZE_TEXT_FILES = [
     "config.toml",
-    "session_index.jsonl",
-    "models_cache.json",
 ]
+PATH_COLUMN_HINTS = ("path", "cwd", "file", "folder", "dir", "root", "source", "workspace")
 
 
 @dataclass
@@ -261,6 +260,11 @@ def normalize_extended_paths_in_text(value: str) -> str:
 
 def normalized_path(value: str) -> Path:
     return Path(normalize_extended_path(value))
+
+
+def is_path_column(name: str) -> bool:
+    lower = name.lower()
+    return any(hint in lower for hint in PATH_COLUMN_HINTS)
 
 
 def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -538,7 +542,11 @@ def normalize_sqlite_paths(conn: sqlite3.Connection, apply: bool) -> int:
     ]
     for table in tables:
         cols = cur.execute(f'pragma table_info("{table}")').fetchall()
-        text_cols = [col[1] for col in cols if "TEXT" in (col[2] or "").upper() or col[2] == ""]
+        text_cols = [
+            col[1]
+            for col in cols
+            if ("TEXT" in (col[2] or "").upper() or col[2] == "") and is_path_column(str(col[1]))
+        ]
         for col in text_cols:
             rows = cur.execute(
                 f'select rowid, "{col}" from "{table}" where instr("{col}", ?) > 0',
