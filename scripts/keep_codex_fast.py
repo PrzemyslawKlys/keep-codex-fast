@@ -12,6 +12,7 @@ import os
 import platform
 import re
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -501,7 +502,8 @@ def repair_thread_metadata_bloat(
 def write_thread_metadata_restore_script(manifest: Path, state_db: Path, backup_root: Path) -> None:
     restore = backup_root / "restore-thread-metadata.py"
     restore.write_text(
-        f'''import json
+        f'''#!/usr/bin/env python3
+import json
 import sqlite3
 from pathlib import Path
 
@@ -528,7 +530,9 @@ conn.close()
 ''',
         encoding="utf-8",
     )
+    restore.chmod(0o700)
     report(f"thread_metadata_restore_script {restore}")
+    report(f"thread_metadata_restore_command python3 {shlex.quote(str(restore))}")
 
 
 def normalize_sqlite_paths(conn: sqlite3.Connection, apply: bool) -> int:
@@ -877,7 +881,8 @@ def write_session_restore_script(
 ) -> None:
     restore = backup_root / restore_name
     restore.write_text(
-        f'''import json
+        f'''#!/usr/bin/env python3
+import json
 import shutil
 import sqlite3
 from pathlib import Path
@@ -910,7 +915,9 @@ conn.close()
 ''',
         encoding="utf-8",
     )
+    restore.chmod(0o700)
     report(f"session_restore_script {restore}")
+    report(f"session_restore_command python3 {shlex.quote(str(restore))}")
 
 
 def prune_config(codex_home: Path, backup_root: Path, apply: bool, write_artifacts: bool) -> None:

@@ -9,6 +9,7 @@ import io
 import importlib.util
 import json
 import os
+import shlex
 import sqlite3
 import sys
 import tempfile
@@ -495,7 +496,7 @@ def assert_targeted_session_archive(module) -> None:
 def assert_apply_mode(module) -> None:
     with tempfile.TemporaryDirectory() as td:
         paths = make_fake_home(Path(td))
-        backup = Path(td) / "backup-apply"
+        backup = Path(td) / "backup apply with spaces"
         (paths["codex_home"] / "session_index.jsonl").write_text(
             '{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","thread_name":"Friendly Agent","updated_at":"2026-01-01T00:00:00.000Z"}\n',
             encoding="utf-8",
@@ -517,7 +518,10 @@ def assert_apply_mode(module) -> None:
             thread_preview_limit=240,
             repair_thread_metadata_bloat=True,
         )
-        assert module.run(args) == 0
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert module.run(args) == 0
+        text = output.getvalue()
 
         conn = sqlite3.connect(paths["state_db"])
         archived, archived_at, rollout_path, cwd, title, preview = conn.execute(
@@ -540,8 +544,15 @@ def assert_apply_mode(module) -> None:
         assert "DefinitelyMissingKeepCodexFast" not in (paths["codex_home"] / "config.toml").read_text(
             encoding="utf-8"
         )
-        assert (backup / "restore-sessions.py").exists()
-        assert (backup / "restore-thread-metadata.py").exists()
+        resolved_backup = backup.resolve()
+        session_restore = resolved_backup / "restore-sessions.py"
+        metadata_restore = resolved_backup / "restore-thread-metadata.py"
+        assert session_restore.exists()
+        assert metadata_restore.exists()
+        assert os.access(session_restore, os.X_OK)
+        assert os.access(metadata_restore, os.X_OK)
+        assert f"session_restore_command python3 {shlex.quote(str(session_restore))}" in text
+        assert f"thread_metadata_restore_command python3 {shlex.quote(str(metadata_restore))}" in text
         assert (backup / "moved-sessions.jsonl").exists()
         assert (backup / "thread-metadata-repairs.jsonl").exists()
         assert (backup / "moved-worktrees.jsonl").exists()

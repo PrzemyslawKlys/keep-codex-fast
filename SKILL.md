@@ -99,6 +99,7 @@ If the user wants automation and the Codex app automation tool is available, cre
 ## What Apply Does
 
 - Backs up important metadata to `~/Documents/Codex/codex-backups/keep-codex-fast-*`.
+- Writes executable restore scripts and prints copy-paste-safe `python3` restore commands.
 - Archives old non-pinned sessions to `~/.codex/archived_sessions/`.
 - Uses `updated_at` for age-based session archiving by default, or `created_at` with `--archive-age-field created_at`.
 - Supports targeted session archiving with `--archive-thread-id` or `--archive-rollout-path`, still backup-first and archive-only.
