@@ -56,7 +56,21 @@ def make_fake_home(root: Path) -> dict[str, Path]:
     os.utime(worktree, (old_time, old_time))
 
     log_file = codex_home / "logs_2.sqlite"
-    log_file.write_text("log", encoding="utf-8")
+    log_conn = sqlite3.connect(log_file)
+    log_conn.execute(
+        """
+        create table logs (
+            id integer primary key autoincrement,
+            ts integer not null,
+            level text not null,
+            target text not null,
+            feedback_log_body text,
+            thread_id text
+        )
+        """
+    )
+    log_conn.commit()
+    log_conn.close()
     tui_log_file = codex_home / "log" / "codex-tui.log"
     tui_log_file.parent.mkdir(parents=True)
     tui_log_file.write_text("tui log", encoding="utf-8")
@@ -1007,6 +1021,83 @@ def assert_recover_thread_archive_refresh_is_targeted(module) -> None:
         assert not (backup / "moved-sessions.jsonl").exists()
 
 
+def assert_detected_broken_thread_recovery(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_fake_home(Path(td))
+        now = int(time.time())
+        log_conn = sqlite3.connect(paths["log_file"])
+        log_conn.execute(
+            """
+            insert into logs (ts, level, target, feedback_log_body, thread_id)
+            values (?, 'WARN', 'codex_app_server::mcp_refresh', ?, NULL)
+            """,
+            (
+                now,
+                "failed to queue MCP refresh for thread aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa: "
+                "internal error; agent loop died unexpectedly",
+            ),
+        )
+        log_conn.commit()
+        log_conn.close()
+        conn = sqlite3.connect(paths["state_db"])
+        conn.execute(
+            "update threads set archived=1, archived_at=? where id=?",
+            (now, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        )
+        conn.commit()
+        conn.close()
+
+        report_args = argparse.Namespace(
+            apply=False,
+            backup_only=False,
+            details=True,
+            wait_for_codex_exit=False,
+            codex_home=str(paths["codex_home"]),
+            backup_root=None,
+            archive_older_than_days=99999,
+            archive_age_field="updated_at",
+            archive_thread_id=[],
+            archive_rollout_path=[],
+            recover_thread_id=[],
+            recover_detected_threads=False,
+            broken_thread_lookback_hours=48,
+            max_recover_detected_threads=20,
+            hot_normalize_paths=False,
+            hot_normalize_watch_seconds=0,
+            hot_normalize_interval_seconds=30,
+            worktree_older_than_days=99999,
+            rotate_logs_above_mb=99999,
+            thread_title_limit=120,
+            thread_preview_limit=240,
+            repair_thread_metadata_bloat=False,
+            archive_malformed_local_tasks=False,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert module.run(report_args) == 0
+        text = output.getvalue()
+        assert "broken_thread_candidates 1" in text
+        assert "thread_id=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" in text
+
+        backup = Path(td) / "backup-detected-recovery"
+        apply_args = argparse.Namespace(**{**report_args.__dict__, "apply": True, "recover_detected_threads": True, "backup_root": str(backup)})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert module.run(apply_args) == 0
+        text = output.getvalue()
+        assert "codex_thread_recovery_candidates 1" in text
+        assert "codex_thread_recovery_applied 1" in text
+        assert (backup / "state_5.sqlite").exists()
+        conn = sqlite3.connect(paths["state_db"])
+        archived, archived_at = conn.execute(
+            "select archived, archived_at from threads where id=?",
+            ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",),
+        ).fetchone()
+        conn.close()
+        assert archived == 1
+        assert archived_at is not None
+
+
 def main() -> int:
     module = load_module()
     assert_report_mode(module)
@@ -1023,6 +1114,7 @@ def main() -> int:
     assert_malformed_local_task_archive_mode(module)
     assert_malformed_local_task_archive_without_archived_column(module)
     assert_recover_thread_archive_refresh_is_targeted(module)
+    assert_detected_broken_thread_recovery(module)
     assert_repair_adds_bounded_name_when_no_existing_name(module)
     assert_repair_restores_existing_name_when_title_is_already_bounded(module)
     assert_worktree_restore_round_trip(module)

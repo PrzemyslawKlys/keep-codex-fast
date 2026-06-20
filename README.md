@@ -18,6 +18,7 @@ The rule is simple:
 - **Optional repair:** only with `--apply --repair-thread-metadata-bloat`; shortens oversized SQLite display title/preview metadata after backup. The transcript stays intact.
 - **Optional malformed-task archive:** only with `--apply --archive-malformed-local-tasks`; archives active no-user-event local task sessions with suspicious workspace roots such as `/` or OS temp folders.
 - **Targeted thread recovery:** only with `--apply --recover-thread-id THREAD_ID`; backs up SQLite, refreshes one thread's archived state, and skips broad cleanup.
+- **Detected thread recovery:** only with `--apply --recover-detected-threads`; backs up SQLite, refreshes recent broken-thread candidates found in `logs_2.sqlite`, and skips broad cleanup.
 
 ## Who This Is For
 
@@ -259,6 +260,20 @@ python scripts/keep_codex_fast.py --apply --recover-thread-id 00000000-0000-0000
 
 This mode is intentionally narrow. It creates a SQLite backup, toggles the target thread through an archived state, restores the thread to its original final active/archived state, and exits without moving sessions, rotating logs, pruning config, or running broad cleanup. Prefer the Codex app archive/unarchive API first when available; this CLI option is the backup-first storage-level equivalent for local tooling.
 
+Normal report mode also scans recent `logs_2.sqlite` entries for agent-loop/start-turn failure signatures:
+
+```bash
+python scripts/keep_codex_fast.py --details --broken-thread-lookback-hours 72
+```
+
+If the report shows valid candidates and you want the storage-level recovery path, recover detected threads explicitly:
+
+```bash
+python scripts/keep_codex_fast.py --apply --recover-detected-threads
+```
+
+This is still narrow and backup-first. It refreshes only detected thread ids that still exist in local state.
+
 Wait for Codex to exit before applying:
 
 ```bash
@@ -278,6 +293,7 @@ The skill can safely handle:
 - oversized thread title and first-message preview metadata in `state_5.sqlite`, only with `--repair-thread-metadata-bloat`
 - malformed no-user-event local task sessions, only with `--archive-malformed-local-tasks`
 - a single wedged thread's archive state, only with `--recover-thread-id`
+- recent broken-thread candidates from `logs_2.sqlite`, only with `--recover-detected-threads`
 
 It does not permanently delete chats, logs, or worktrees. It moves them into archive folders and writes backup/restore artifacts before applying changes. Restore scripts are emitted with copy-paste-safe Python commands, including when the backup path contains spaces.
 

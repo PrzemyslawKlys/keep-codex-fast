@@ -26,6 +26,10 @@ THREAD_ID_RE = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
     re.I,
 )
+THREAD_REFERENCE_RE = re.compile(
+    r"(?:thread|conversation)(?:\s+id)?\s*[:=]?\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.I,
+)
 PROJECT_HEADER_RE = re.compile(r"^\[projects\.([\"'])(.+)\1\]\s*$")
 TEMP_PROJECT_RE = re.compile(
     r"(\\AppData\\Local\\Temp\\|/AppData/Local/Temp/|\\Temp\\codex-|/Temp/codex-|\\Temp\\spark-|/Temp/spark-)",
@@ -89,6 +93,15 @@ class ThreadArchiveRefreshCandidate:
     was_archived: bool
 
 
+@dataclass
+class BrokenThreadCandidate:
+    thread_id: str
+    title: str
+    failure_count: int
+    last_seen: int
+    was_archived: bool | None
+
+
 def now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -137,7 +150,8 @@ def mb(value: int) -> str:
 
 
 def report(line: str) -> None:
-    print(line)
+    encoding = sys.stdout.encoding or "utf-8"
+    print(str(line).encode(encoding, errors="backslashreplace").decode(encoding, errors="replace"))
 
 
 def python_restore_command(script: Path) -> str:
@@ -653,6 +667,112 @@ def recover_thread_archive_state(
         set_archived_state(item.thread_id, archived=True)
         set_archived_state(item.thread_id, archived=item.was_archived)
     report(f"codex_thread_recovery_applied {len(candidates)}")
+
+
+BROKEN_THREAD_LOG_PATTERNS = (
+    "agent loop died",
+    "failed to start turn",
+    "failed to update thread settings",
+    "error creating task",
+    "error submitting message",
+)
+
+
+def broken_thread_candidates(
+    codex_home: Path,
+    state_conn: sqlite3.Connection,
+    *,
+    lookback_hours: int,
+) -> list[BrokenThreadCandidate]:
+    logs_db = codex_home / "logs_2.sqlite"
+    if not logs_db.exists():
+        return []
+
+    since = int(time.time()) - max(1, lookback_hours) * 60 * 60
+    clauses = " or ".join(["lower(coalesce(feedback_log_body,'')) like ?" for _ in BROKEN_THREAD_LOG_PATTERNS])
+    params: list[object] = [since]
+    params.extend(f"%{pattern}%" for pattern in BROKEN_THREAD_LOG_PATTERNS)
+    try:
+        logs_conn = sqlite_connect(logs_db, readonly=True)
+        logs_conn.execute("pragma busy_timeout=1000")
+        rows = logs_conn.execute(
+            f"""
+            select ts, thread_id, feedback_log_body
+            from logs
+            where ts >= ?
+              and ({clauses})
+            order by ts desc
+            """,
+            params,
+        ).fetchall()
+        logs_conn.close()
+    except sqlite3.Error:
+        return []
+
+    grouped: dict[str, tuple[int, int]] = {}
+    for ts, thread_id, body in rows:
+        ids = set(THREAD_REFERENCE_RE.findall(str(body or "")))
+        if isinstance(thread_id, str) and THREAD_ID_RE.fullmatch(thread_id):
+            ids.add(thread_id)
+        for candidate_id in ids:
+            current = grouped.get(candidate_id)
+            count = 1 if current is None else current[0] + 1
+            latest = int(ts or 0) if current is None else max(current[1], int(ts or 0))
+            grouped[candidate_id] = (count, latest)
+
+    if not grouped:
+        return []
+
+    columns = table_columns(state_conn, "threads")
+    title_expr = "title" if "title" in columns else "''"
+    archived_expr = "archived" if "archived" in columns else "NULL"
+    archived_at_expr = "archived_at" if "archived_at" in columns else "NULL"
+    candidates: list[BrokenThreadCandidate] = []
+    for thread_id, (count, latest) in grouped.items():
+        row = None
+        if "id" in columns:
+            row = state_conn.execute(
+                f"select {title_expr}, {archived_expr}, {archived_at_expr} from threads where id=?",
+                (thread_id,),
+            ).fetchone()
+        if row is None:
+            candidates.append(
+                BrokenThreadCandidate(
+                    thread_id=thread_id,
+                    title="",
+                    failure_count=count,
+                    last_seen=latest,
+                    was_archived=None,
+                )
+            )
+            continue
+        title, archived, archived_at = row
+        candidates.append(
+            BrokenThreadCandidate(
+                thread_id=thread_id,
+                title=title or "",
+                failure_count=count,
+                last_seen=latest,
+                was_archived=boolish(archived) or archived_at is not None,
+            )
+        )
+
+    return sorted(candidates, key=lambda item: (item.last_seen, item.failure_count), reverse=True)
+
+
+def report_broken_thread_candidates(candidates: list[BrokenThreadCandidate], *, details: bool) -> None:
+    report(f"broken_thread_candidates {len(candidates)}")
+    for index, item in enumerate(candidates, start=1):
+        label = f"thread_{index:03d}"
+        state = "missing" if item.was_archived is None else "archived" if item.was_archived else "active"
+        last_seen = datetime.fromtimestamp(item.last_seen, UTC).isoformat(timespec="seconds") if item.last_seen else "unknown"
+        if details:
+            report(
+                f"broken_thread_candidate {label} thread_id={item.thread_id} "
+                f"failures={item.failure_count} last_seen={last_seen} state={state} title={item.title[:70]}"
+            )
+        else:
+            report(f"broken_thread_candidate {label} failures={item.failure_count} last_seen={last_seen} state={state}")
 
 
 def normalize_sqlite_paths(
@@ -1259,8 +1379,9 @@ def run(args: argparse.Namespace) -> int:
         report(f"codex_home_missing {codex_home}")
         return 2
 
-    recovery_thread_ids = getattr(args, "recover_thread_id", [])
-    recovery_mode = bool(recovery_thread_ids)
+    recovery_thread_ids = list(getattr(args, "recover_thread_id", []))
+    recover_detected_threads = bool(getattr(args, "recover_detected_threads", False))
+    recovery_mode = bool(recovery_thread_ids or recover_detected_threads)
     stamp = now_stamp()
     backup_root = Path(args.backup_root).expanduser() if args.backup_root else documents_backup_root() / f"keep-codex-fast-{stamp}"
     backup_root = backup_root.resolve()
@@ -1314,6 +1435,20 @@ def run(args: argparse.Namespace) -> int:
     if state_db.exists():
         conn = sqlite_connect(state_db, readonly=not path_apply)
         conn.execute("pragma busy_timeout=10000")
+        detected_broken_threads = broken_thread_candidates(
+            codex_home,
+            conn,
+            lookback_hours=getattr(args, "broken_thread_lookback_hours", 48),
+        )
+        report_broken_thread_candidates(detected_broken_threads, details=args.details)
+        if recover_detected_threads:
+            detected_ids = [
+                item.thread_id
+                for item in detected_broken_threads
+                if item.was_archived is not None
+            ][: getattr(args, "max_recover_detected_threads", 20)]
+            seen = set(recovery_thread_ids)
+            recovery_thread_ids.extend(thread_id for thread_id in detected_ids if thread_id not in seen)
         if recovery_mode:
             recover_thread_archive_state(
                 conn,
@@ -1466,6 +1601,26 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "Use with --apply after a backup is created. Can be repeated."
         ),
     )
+    parser.add_argument(
+        "--recover-detected-threads",
+        action="store_true",
+        help=(
+            "With --apply, refresh recent broken-thread candidates detected in logs_2.sqlite. "
+            "Report mode only lists candidates."
+        ),
+    )
+    parser.add_argument(
+        "--broken-thread-lookback-hours",
+        type=int,
+        default=48,
+        help="How many hours of logs_2.sqlite to inspect for broken-thread signatures. Default: 48.",
+    )
+    parser.add_argument(
+        "--max-recover-detected-threads",
+        type=int,
+        default=20,
+        help="Maximum detected thread candidates to recover with --recover-detected-threads. Default: 20.",
+    )
     parser.add_argument("--worktree-older-than-days", type=int, default=7)
     parser.add_argument(
         "--rotate-logs-above-mb",
@@ -1507,6 +1662,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     for thread_id in args.recover_thread_id:
         if not THREAD_ID_RE.fullmatch(thread_id):
             parser.error(f"--recover-thread-id must be a UUID-like thread id: {thread_id}")
+    if args.recover_detected_threads and not args.apply:
+        parser.error("--recover-detected-threads requires --apply")
+    if args.broken_thread_lookback_hours < 1:
+        parser.error("--broken-thread-lookback-hours must be at least 1")
+    if args.max_recover_detected_threads < 1:
+        parser.error("--max-recover-detected-threads must be at least 1")
     if args.archive_older_than_days < 0:
         parser.error("--archive-older-than-days must be non-negative")
     if args.thread_title_limit < 20:
