@@ -102,6 +102,13 @@ class BrokenThreadCandidate:
     was_archived: bool | None
 
 
+@dataclass
+class ThreadAutomationBackup:
+    automation_id: str
+    source: Path
+    backup: Path
+
+
 def now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -594,10 +601,76 @@ def boolish(value: object) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def automation_targets_thread(definition: Path, thread_id: str) -> bool:
+    try:
+        for line in definition.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped.lower().startswith("target_thread_id"):
+                continue
+            _, _, value = stripped.partition("=")
+            if value.strip().strip('"').lower() == thread_id.lower():
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def thread_automation_directories(root: Path, thread_id: str) -> list[Path]:
+    automations = root / "automations"
+    if not automations.exists():
+        return []
+    result: list[Path] = []
+    for child in automations.iterdir():
+        definition = child / "automation.toml"
+        if child.is_dir() and definition.exists() and automation_targets_thread(definition, thread_id):
+            result.append(child)
+    return result
+
+
+def backup_thread_automations(codex_home: Path, backup_root: Path, thread_ids: list[str]) -> list[ThreadAutomationBackup]:
+    backups: list[ThreadAutomationBackup] = []
+    backup_automation_root = backup_root / "thread_recovery_automations"
+    seen: set[Path] = set()
+    for thread_id in thread_ids:
+        for source in thread_automation_directories(codex_home, thread_id):
+            resolved = source.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            destination = backup_automation_root / source.name
+            if destination.exists():
+                shutil.rmtree(destination)
+            shutil.copytree(source, destination)
+            backups.append(ThreadAutomationBackup(source.name, source, destination))
+    return backups
+
+
+def restore_missing_thread_automations(backups: list[ThreadAutomationBackup]) -> int:
+    restored = 0
+    for item in backups:
+        if (item.source / "automation.toml").exists():
+            continue
+        if item.source.exists():
+            shutil.rmtree(item.source)
+        shutil.copytree(item.backup, item.source)
+        restored += 1
+    return restored
+
+
+def count_thread_automations(codex_home: Path, thread_ids: list[str]) -> int:
+    seen: set[Path] = set()
+    for thread_id in thread_ids:
+        for source in thread_automation_directories(codex_home, thread_id):
+            seen.add(source.resolve())
+    return len(seen)
+
+
 def recover_thread_archive_state(
     conn: sqlite3.Connection,
     thread_ids: list[str],
     *,
+    codex_home: Path,
+    backup_root: Path,
     apply: bool,
     details: bool,
 ) -> None:
@@ -648,6 +721,13 @@ def recover_thread_archive_state(
     if not apply or not candidates:
         return
 
+    candidate_ids = [item.thread_id for item in candidates]
+    automation_backups = backup_thread_automations(codex_home, backup_root, candidate_ids)
+    report(f"codex_thread_recovery_automations {len(automation_backups)}")
+    if details:
+        for item in automation_backups:
+            report(f"codex_thread_recovery_automation id={item.automation_id}")
+
     now = int(time.time())
     cur = conn.cursor()
 
@@ -666,6 +746,9 @@ def recover_thread_archive_state(
     for item in candidates:
         set_archived_state(item.thread_id, archived=True)
         set_archived_state(item.thread_id, archived=item.was_archived)
+    restored = restore_missing_thread_automations(automation_backups)
+    report(f"codex_thread_recovery_automations_restored {restored}")
+    report(f"codex_thread_recovery_automations_after {count_thread_automations(codex_home, candidate_ids)}")
     report(f"codex_thread_recovery_applied {len(candidates)}")
 
 
@@ -1453,6 +1536,8 @@ def run(args: argparse.Namespace) -> int:
             recover_thread_archive_state(
                 conn,
                 recovery_thread_ids,
+                codex_home=codex_home,
+                backup_root=backup_root,
                 apply=effective_apply,
                 details=args.details,
             )

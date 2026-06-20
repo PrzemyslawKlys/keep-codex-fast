@@ -258,7 +258,7 @@ Recover one stuck Codex Desktop thread by refreshing only that thread's archive 
 python scripts/keep_codex_fast.py --apply --recover-thread-id 00000000-0000-0000-0000-000000000000
 ```
 
-This mode is intentionally narrow. It creates a SQLite backup, toggles the target thread through an archived state, restores the thread to its original final active/archived state, and exits without moving sessions, rotating logs, pruning config, or running broad cleanup. Prefer the Codex app archive/unarchive API first when available; this CLI option is the backup-first storage-level equivalent for local tooling.
+This mode is intentionally narrow. It creates a SQLite backup, backs up automations whose `target_thread_id` matches the recovered thread, toggles the target thread through an archived state, restores the thread to its original final active/archived state, restores missing matching automation definitions, and exits without moving sessions, rotating logs, pruning config, or running broad cleanup. Prefer the Codex app archive/unarchive API first when available, but snapshot matching automations before using that API because app-level archive/unarchive can remove thread heartbeats.
 
 Normal report mode also scans recent `logs_2.sqlite` entries for agent-loop/start-turn failure signatures:
 

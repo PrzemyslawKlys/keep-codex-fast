@@ -980,6 +980,24 @@ def assert_recover_thread_archive_refresh_is_targeted(module) -> None:
     with tempfile.TemporaryDirectory() as td:
         paths = make_fake_home(Path(td))
         backup = Path(td) / "backup-recover"
+        automation = paths["codex_home"] / "automations" / "recheck-thread"
+        automation.mkdir(parents=True)
+        automation_toml = automation / "automation.toml"
+        automation_toml.write_text(
+            '\n'.join(
+                [
+                    'version = 1',
+                    'id = "recheck-thread"',
+                    'kind = "heartbeat"',
+                    'name = "Recheck Thread"',
+                    'status = "ACTIVE"',
+                    'rrule = "FREQ=MINUTELY;INTERVAL=15"',
+                    'target_thread_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"',
+                    '',
+                ]
+            ),
+            encoding="utf-8",
+        )
         args = argparse.Namespace(
             apply=True,
             backup_only=False,
@@ -1012,12 +1030,17 @@ def assert_recover_thread_archive_refresh_is_targeted(module) -> None:
         conn.close()
 
         assert "codex_thread_recovery_mode targeted=true broad_cleanup=false" in text
+        assert "codex_thread_recovery_automations 1" in text
+        assert "codex_thread_recovery_automations_after 1" in text
+        assert "codex_thread_recovery_automations_restored 0" in text
         assert "codex_thread_recovery_applied 1" in text
         assert archived == 0
         assert archived_at is None
         assert rollout_path == str(paths["rollout"])
         assert paths["rollout"].exists(), "thread recovery must not archive the session transcript"
         assert (backup / "state_5.sqlite").exists(), "thread recovery must back up state first"
+        assert (backup / "thread_recovery_automations" / "recheck-thread" / "automation.toml").exists()
+        assert automation_toml.exists(), "thread recovery must preserve matching automations"
         assert not (backup / "moved-sessions.jsonl").exists()
 
 
