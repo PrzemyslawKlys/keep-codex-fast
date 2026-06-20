@@ -35,8 +35,8 @@ There are three modes:
 - Hot path repair: `--apply --hot-normalize-paths`; backs up and aligns SQLite path fields to Codex Desktop's active `\\?\` path convention even while Codex is running. It does not archive sessions, rotate logs, move worktrees, prune config, or repair title/preview metadata.
 - Optional repair: `--apply --repair-thread-metadata-bloat`; shortens oversized SQLite display title/preview metadata after backup. The rollout transcript stays intact.
 - Optional malformed-task archive: `--apply --archive-malformed-local-tasks`; archives active no-user-event local task sessions with suspicious workspace roots such as `/` or OS temp folders after backup.
-- Targeted thread recovery: `--apply --recover-thread-id THREAD_ID`; backs up SQLite and matching thread automations, refreshes one thread's archived state, restores its original final active/archived state, restores missing matching automation definitions, and skips broad cleanup.
-- Detected thread recovery: `--apply --recover-detected-threads`; backs up SQLite and matching thread automations, refreshes recent active non-archived broken-thread candidates found in `logs_2.sqlite`, restores missing matching automation definitions, and skips broad cleanup.
+- Targeted thread recovery: `--apply --recover-thread-id THREAD_ID`; backs up SQLite and matching thread automations, performs a storage-level archive-state refresh, restores its original final active/archived state, restores missing matching automation definitions, and skips broad cleanup.
+- Detected thread recovery: `--apply --recover-detected-threads`; backs up SQLite and matching thread automations, refreshes current active non-archived failure-log candidates found in `logs_2.sqlite`, restores missing matching automation definitions, and skips broad cleanup.
 
 ## Default Workflow
 
@@ -106,9 +106,11 @@ If the user wants to recover a Codex Desktop thread that shows `Error submitting
 python scripts/keep_codex_fast.py --apply --recover-thread-id THREAD_ID
 ```
 
-That mode is backup-first and intentionally narrow. It refreshes only the requested row's archive state, snapshots automations that target that thread, restores missing matching automation definitions, and then exits without stale-session archiving, path cleanup, config pruning, log rotation, malformed-task archiving, or metadata repair.
+That mode is backup-first and intentionally narrow. It refreshes only the requested row's archive state in storage, snapshots automations that target that thread, restores missing matching automation definitions, and then exits without stale-session archiving, path cleanup, config pruning, log rotation, malformed-task archiving, or metadata repair.
 
-Normal report mode scans recent `logs_2.sqlite` entries for agent-loop/start-turn failure signatures and prints both legacy `broken_thread_*` candidate counts and clearer `thread_failure_log_*` counts. Use `--details` to show raw ids:
+If the thread still fails with `failed to start turn` after the storage-level refresh, use the Codex app archive/unarchive API from `$codex-thread-recovery`. That app-level operation is the proven reset for Desktop's loaded-loop cache. Recheck and restore matching automations afterward because app-level archive/unarchive can remove heartbeat automations.
+
+Normal report mode scans recent `logs_2.sqlite` entries for agent-loop/start-turn failure signatures and prints both legacy `broken_thread_*` candidate counts and clearer `thread_failure_log_*` counts. Failure logs older than later local thread activity remain visible as stale diagnostics but are not treated as recoverable. Use `--details` to show raw ids:
 
 ```bash
 python scripts/keep_codex_fast.py --details --broken-thread-lookback-hours 72
@@ -120,7 +122,7 @@ If those candidates should be recovered through the local storage path, use:
 python scripts/keep_codex_fast.py --apply --recover-detected-threads
 ```
 
-This is still explicit and backup-first. It refreshes only active non-archived detected rows by default, leaving archived or missing historical candidates as diagnostics. It should not run silently as broad scheduled maintenance.
+This is still explicit and backup-first. It refreshes only active non-archived detected rows whose failure is not older than later local thread activity, leaving archived, missing, and stale-after-activity candidates as diagnostics. It should not run silently as broad scheduled maintenance.
 
 7. Verify after applying:
 
@@ -143,7 +145,7 @@ If the user wants automation and the Codex app automation tool is available, cre
 - Uses `updated_at` for age-based session archiving by default, or `created_at` with `--archive-age-field created_at`.
 - Supports targeted session archiving with `--archive-thread-id` or `--archive-rollout-path`, still backup-first and archive-only.
 - Supports targeted thread recovery with `--recover-thread-id`, still backup-first and one-thread only, including matching automation backup/restore.
-- Reports recent broken-thread candidates from `logs_2.sqlite`; with `--recover-detected-threads`, refreshes only detected active non-archived rows that still exist in local state and preserves matching automations.
+- Reports recent broken-thread candidates from `logs_2.sqlite`; with `--recover-detected-threads`, refreshes only current detected active non-archived rows that still exist in local state and preserves matching automations.
 - Normalizes Windows extended paths like `\\?\C:\...` inside local SQLite text fields and selected metadata files such as `config.toml`.
 - With `--apply --hot-normalize-paths`, aligns active SQLite path fields to the active `\\?\` convention while Codex is running, after backup.
 - With `--hot-normalize-watch-seconds`, repeats only that hot path alignment for a bounded window so automations/resumes can get past a running app that rewrites active rows.

@@ -99,7 +99,12 @@ class BrokenThreadCandidate:
     title: str
     failure_count: int
     last_seen: int
+    last_activity_at: int | None
     was_archived: bool | None
+
+    @property
+    def is_current(self) -> bool:
+        return self.last_activity_at is None or self.last_seen >= self.last_activity_at
 
 
 @dataclass
@@ -818,12 +823,14 @@ def broken_thread_candidates(
     title_expr = "title" if "title" in columns else "''"
     archived_expr = "archived" if "archived" in columns else "NULL"
     archived_at_expr = "archived_at" if "archived_at" in columns else "NULL"
+    updated_at_expr = "updated_at" if "updated_at" in columns else "NULL"
+    recency_at_expr = "recency_at" if "recency_at" in columns else "NULL"
     candidates: list[BrokenThreadCandidate] = []
     for thread_id, (count, latest) in grouped.items():
         row = None
         if "id" in columns:
             row = state_conn.execute(
-                f"select {title_expr}, {archived_expr}, {archived_at_expr} from threads where id=?",
+                f"select {title_expr}, {archived_expr}, {archived_at_expr}, {updated_at_expr}, {recency_at_expr} from threads where id=?",
                 (thread_id,),
             ).fetchone()
         if row is None:
@@ -833,17 +840,20 @@ def broken_thread_candidates(
                     title="",
                     failure_count=count,
                     last_seen=latest,
+                    last_activity_at=None,
                     was_archived=None,
                 )
             )
             continue
-        title, archived, archived_at = row
+        title, archived, archived_at, updated_at, recency_at = row
+        activity_values = [int(value) for value in (updated_at, recency_at) if value is not None]
         candidates.append(
             BrokenThreadCandidate(
                 thread_id=thread_id,
                 title=title or "",
                 failure_count=count,
                 last_seen=latest,
+                last_activity_at=max(activity_values) if activity_values else None,
                 was_archived=boolish(archived) or archived_at is not None,
             )
         )
@@ -852,22 +862,26 @@ def broken_thread_candidates(
 
 
 def report_broken_thread_candidates(candidates: list[BrokenThreadCandidate], *, details: bool) -> None:
-    recoverable_count = sum(1 for item in candidates if item.was_archived is False)
+    active_count = sum(1 for item in candidates if item.was_archived is False)
+    recoverable_count = sum(1 for item in candidates if item.was_archived is False and item.is_current)
+    stale_active_count = active_count - recoverable_count
     report(f"broken_thread_candidates {len(candidates)}")
     report(f"broken_thread_recoverable_candidates {recoverable_count}")
     report(f"thread_failure_log_candidates {len(candidates)}")
     report(f"thread_failure_log_recoverable_active_candidates {recoverable_count}")
+    report(f"thread_failure_log_stale_active_candidates {stale_active_count}")
     for index, item in enumerate(candidates, start=1):
         label = f"thread_{index:03d}"
         state = "missing" if item.was_archived is None else "archived" if item.was_archived else "active"
         last_seen = datetime.fromtimestamp(item.last_seen, UTC).isoformat(timespec="seconds") if item.last_seen else "unknown"
+        freshness = "current" if item.is_current else "stale_after_activity"
         if details:
             report(
                 f"broken_thread_candidate {label} thread_id={item.thread_id} "
-                f"failures={item.failure_count} last_seen={last_seen} state={state} title={item.title[:70]}"
+                f"failures={item.failure_count} last_seen={last_seen} state={state} freshness={freshness} title={item.title[:70]}"
             )
         else:
-            report(f"broken_thread_candidate {label} failures={item.failure_count} last_seen={last_seen} state={state}")
+            report(f"broken_thread_candidate {label} failures={item.failure_count} last_seen={last_seen} state={state} freshness={freshness}")
 
 
 def normalize_sqlite_paths(
@@ -1540,7 +1554,7 @@ def run(args: argparse.Namespace) -> int:
             detected_ids = [
                 item.thread_id
                 for item in detected_broken_threads
-                if item.was_archived is False
+                if item.was_archived is False and item.is_current
             ][: getattr(args, "max_recover_detected_threads", 20)]
             seen = set(recovery_thread_ids)
             recovery_thread_ids.extend(thread_id for thread_id in detected_ids if thread_id not in seen)

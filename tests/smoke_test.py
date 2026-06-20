@@ -1063,6 +1063,17 @@ def assert_detected_broken_thread_recovery(module) -> None:
         log_conn.execute(
             """
             insert into logs (ts, level, target, feedback_log_body, thread_id)
+            values (?, 'WARN', 'codex_app_server::mcp_refresh', ?, NULL)
+            """,
+            (
+                now - 100,
+                "failed to queue MCP refresh for thread cccccccc-cccc-cccc-cccc-cccccccccccc: "
+                "internal error; agent loop died unexpectedly",
+            ),
+        )
+        log_conn.execute(
+            """
+            insert into logs (ts, level, target, feedback_log_body, thread_id)
             values (?, 'INFO', 'codex_core::session', ?, ?)
             """,
             (
@@ -1104,6 +1115,20 @@ def assert_detected_broken_thread_recovery(module) -> None:
                 0,
             ),
         )
+        conn.execute(
+            "insert into threads values (?,?,?,?,?,?,?,?,?)",
+            (
+                "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "Healed active thread",
+                "Healed active thread",
+                str(paths["rollout"]),
+                r"\\?\C:\DefinitelyMissingKeepCodexFast",
+                now - 200,
+                now,
+                None,
+                0,
+            ),
+        )
         conn.commit()
         conn.close()
 
@@ -1136,12 +1161,15 @@ def assert_detected_broken_thread_recovery(module) -> None:
         with contextlib.redirect_stdout(output):
             assert module.run(report_args) == 0
         text = output.getvalue()
-        assert "broken_thread_candidates 2" in text
+        assert "broken_thread_candidates 3" in text
         assert "broken_thread_recoverable_candidates 1" in text
-        assert "thread_failure_log_candidates 2" in text
+        assert "thread_failure_log_candidates 3" in text
         assert "thread_failure_log_recoverable_active_candidates 1" in text
+        assert "thread_failure_log_stale_active_candidates 1" in text
         assert "thread_id=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" in text
         assert "thread_id=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" in text
+        assert "thread_id=cccccccc-cccc-cccc-cccc-cccccccccccc" in text
+        assert "freshness=stale_after_activity" in text
 
         backup = Path(td) / "backup-detected-recovery"
         apply_args = argparse.Namespace(**{**report_args.__dict__, "apply": True, "recover_detected_threads": True, "backup_root": str(backup)})
