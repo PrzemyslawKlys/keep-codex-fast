@@ -752,13 +752,19 @@ def recover_thread_archive_state(
     report(f"codex_thread_recovery_applied {len(candidates)}")
 
 
-BROKEN_THREAD_LOG_PATTERNS = (
-    "agent loop died",
+BROKEN_THREAD_LOG_PREFIXES = (
+    "failed to queue mcp refresh for thread ",
     "failed to start turn",
     "failed to update thread settings",
     "error creating task",
     "error submitting message",
+    "failed to submit message",
 )
+
+
+def is_broken_thread_failure_log(body: object) -> bool:
+    text = str(body or "").lstrip().lower()
+    return any(text.startswith(prefix) for prefix in BROKEN_THREAD_LOG_PREFIXES)
 
 
 def broken_thread_candidates(
@@ -772,9 +778,9 @@ def broken_thread_candidates(
         return []
 
     since = int(time.time()) - max(1, lookback_hours) * 60 * 60
-    clauses = " or ".join(["lower(coalesce(feedback_log_body,'')) like ?" for _ in BROKEN_THREAD_LOG_PATTERNS])
+    clauses = " or ".join(["lower(coalesce(feedback_log_body,'')) like ?" for _ in BROKEN_THREAD_LOG_PREFIXES])
     params: list[object] = [since]
-    params.extend(f"%{pattern}%" for pattern in BROKEN_THREAD_LOG_PATTERNS)
+    params.extend(f"{pattern}%" for pattern in BROKEN_THREAD_LOG_PREFIXES)
     try:
         logs_conn = sqlite_connect(logs_db, readonly=True)
         logs_conn.execute("pragma busy_timeout=1000")
@@ -794,6 +800,8 @@ def broken_thread_candidates(
 
     grouped: dict[str, tuple[int, int]] = {}
     for ts, thread_id, body in rows:
+        if not is_broken_thread_failure_log(body):
+            continue
         ids = set(THREAD_REFERENCE_RE.findall(str(body or "")))
         if isinstance(thread_id, str) and THREAD_ID_RE.fullmatch(thread_id):
             ids.add(thread_id)

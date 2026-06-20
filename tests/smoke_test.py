@@ -1060,6 +1060,18 @@ def assert_detected_broken_thread_recovery(module) -> None:
                 "internal error; agent loop died unexpectedly",
             ),
         )
+        log_conn.execute(
+            """
+            insert into logs (ts, level, target, feedback_log_body, thread_id)
+            values (?, 'INFO', 'codex_core::session', ?, ?)
+            """,
+            (
+                now,
+                "session_loop{thread_id=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa}: "
+                "diagnostic command text mentions agent loop died unexpectedly",
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            ),
+        )
         log_conn.commit()
         log_conn.close()
         conn = sqlite3.connect(paths["state_db"])
