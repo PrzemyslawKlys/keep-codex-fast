@@ -18,7 +18,7 @@ The rule is simple:
 - **Optional repair:** only with `--apply --repair-thread-metadata-bloat`; shortens oversized SQLite display title/preview metadata after backup. The transcript stays intact.
 - **Optional malformed-task archive:** only with `--apply --archive-malformed-local-tasks`; archives active no-user-event local task sessions with suspicious workspace roots such as `/` or OS temp folders.
 - **Targeted thread recovery:** only with `--apply --recover-thread-id THREAD_ID`; backs up SQLite, refreshes one thread's archived state, and skips broad cleanup.
-- **Detected thread recovery:** only with `--apply --recover-detected-threads`; backs up SQLite, refreshes recent broken-thread candidates found in `logs_2.sqlite`, and skips broad cleanup.
+- **Detected thread recovery:** only with `--apply --recover-detected-threads`; backs up SQLite, refreshes recent active non-archived broken-thread candidates found in `logs_2.sqlite`, and skips broad cleanup.
 
 ## Who This Is For
 
@@ -272,7 +272,7 @@ If the report shows valid candidates and you want the storage-level recovery pat
 python scripts/keep_codex_fast.py --apply --recover-detected-threads
 ```
 
-This is still narrow and backup-first. It refreshes only detected thread ids that still exist in local state.
+This is still narrow and backup-first. It refreshes only detected active, non-archived thread ids that still exist in local state. Archived or missing candidates remain visible in the report for diagnostics, but are not auto-recovered by this mode.
 
 Wait for Codex to exit before applying:
 

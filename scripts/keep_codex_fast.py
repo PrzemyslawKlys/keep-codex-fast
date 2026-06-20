@@ -852,7 +852,9 @@ def broken_thread_candidates(
 
 
 def report_broken_thread_candidates(candidates: list[BrokenThreadCandidate], *, details: bool) -> None:
+    recoverable_count = sum(1 for item in candidates if item.was_archived is False)
     report(f"broken_thread_candidates {len(candidates)}")
+    report(f"broken_thread_recoverable_candidates {recoverable_count}")
     for index, item in enumerate(candidates, start=1):
         label = f"thread_{index:03d}"
         state = "missing" if item.was_archived is None else "archived" if item.was_archived else "active"
@@ -1536,7 +1538,7 @@ def run(args: argparse.Namespace) -> int:
             detected_ids = [
                 item.thread_id
                 for item in detected_broken_threads
-                if item.was_archived is not None
+                if item.was_archived is False
             ][: getattr(args, "max_recover_detected_threads", 20)]
             seen = set(recovery_thread_ids)
             recovery_thread_ids.extend(thread_id for thread_id in detected_ids if thread_id not in seen)

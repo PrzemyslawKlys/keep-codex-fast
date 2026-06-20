@@ -1072,12 +1072,37 @@ def assert_detected_broken_thread_recovery(module) -> None:
                 "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             ),
         )
+        log_conn.execute(
+            """
+            insert into logs (ts, level, target, feedback_log_body, thread_id)
+            values (?, 'WARN', 'codex_app_server::mcp_refresh', ?, NULL)
+            """,
+            (
+                now,
+                "failed to queue MCP refresh for thread bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb: "
+                "internal error; agent loop died unexpectedly",
+            ),
+        )
         log_conn.commit()
         log_conn.close()
         conn = sqlite3.connect(paths["state_db"])
         conn.execute(
             "update threads set archived=1, archived_at=? where id=?",
             (now, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        )
+        conn.execute(
+            "insert into threads values (?,?,?,?,?,?,?,?,?)",
+            (
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "Active broken thread",
+                "Active broken thread",
+                str(paths["rollout"]),
+                r"\\?\C:\DefinitelyMissingKeepCodexFast",
+                now,
+                now,
+                None,
+                0,
+            ),
         )
         conn.commit()
         conn.close()
@@ -1111,8 +1136,10 @@ def assert_detected_broken_thread_recovery(module) -> None:
         with contextlib.redirect_stdout(output):
             assert module.run(report_args) == 0
         text = output.getvalue()
-        assert "broken_thread_candidates 1" in text
+        assert "broken_thread_candidates 2" in text
+        assert "broken_thread_recoverable_candidates 1" in text
         assert "thread_id=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" in text
+        assert "thread_id=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" in text
 
         backup = Path(td) / "backup-detected-recovery"
         apply_args = argparse.Namespace(**{**report_args.__dict__, "apply": True, "recover_detected_threads": True, "backup_root": str(backup)})
@@ -1128,9 +1155,15 @@ def assert_detected_broken_thread_recovery(module) -> None:
             "select archived, archived_at from threads where id=?",
             ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",),
         ).fetchone()
+        active_archived, active_archived_at = conn.execute(
+            "select archived, archived_at from threads where id=?",
+            ("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",),
+        ).fetchone()
         conn.close()
         assert archived == 1
         assert archived_at is not None
+        assert active_archived == 0
+        assert active_archived_at is None
 
 
 def main() -> int:
