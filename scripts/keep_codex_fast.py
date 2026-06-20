@@ -855,6 +855,8 @@ def report_broken_thread_candidates(candidates: list[BrokenThreadCandidate], *, 
     recoverable_count = sum(1 for item in candidates if item.was_archived is False)
     report(f"broken_thread_candidates {len(candidates)}")
     report(f"broken_thread_recoverable_candidates {recoverable_count}")
+    report(f"thread_failure_log_candidates {len(candidates)}")
+    report(f"thread_failure_log_recoverable_active_candidates {recoverable_count}")
     for index, item in enumerate(candidates, start=1):
         label = f"thread_{index:03d}"
         state = "missing" if item.was_archived is None else "archived" if item.was_archived else "active"

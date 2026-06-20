@@ -1138,6 +1138,8 @@ def assert_detected_broken_thread_recovery(module) -> None:
         text = output.getvalue()
         assert "broken_thread_candidates 2" in text
         assert "broken_thread_recoverable_candidates 1" in text
+        assert "thread_failure_log_candidates 2" in text
+        assert "thread_failure_log_recoverable_active_candidates 1" in text
         assert "thread_id=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" in text
         assert "thread_id=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" in text
 

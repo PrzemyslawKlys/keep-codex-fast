@@ -108,7 +108,7 @@ python scripts/keep_codex_fast.py --apply --recover-thread-id THREAD_ID
 
 That mode is backup-first and intentionally narrow. It refreshes only the requested row's archive state, snapshots automations that target that thread, restores missing matching automation definitions, and then exits without stale-session archiving, path cleanup, config pruning, log rotation, malformed-task archiving, or metadata repair.
 
-Normal report mode scans recent `logs_2.sqlite` entries for agent-loop/start-turn failure signatures and prints `broken_thread_candidates` plus `broken_thread_recoverable_candidates`. Use `--details` to show raw ids:
+Normal report mode scans recent `logs_2.sqlite` entries for agent-loop/start-turn failure signatures and prints both legacy `broken_thread_*` candidate counts and clearer `thread_failure_log_*` counts. Use `--details` to show raw ids:
 
 ```bash
 python scripts/keep_codex_fast.py --details --broken-thread-lookback-hours 72
