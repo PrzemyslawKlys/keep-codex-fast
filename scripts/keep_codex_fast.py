@@ -12,6 +12,7 @@ import os
 import platform
 import re
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -45,6 +46,7 @@ NORMALIZE_TEXT_FILES = [
     "config.toml",
 ]
 PATH_COLUMN_HINTS = ("path", "cwd", "file", "folder", "dir", "root", "source", "workspace")
+WINDOWS_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:\\")
 
 
 @dataclass
@@ -78,6 +80,13 @@ class ThreadMetadataRepair:
     new_title: str
     old_preview: str
     new_preview: str
+
+
+@dataclass
+class ThreadArchiveRefreshCandidate:
+    thread_id: str
+    title: str
+    was_archived: bool
 
 
 def now_stamp() -> str:
@@ -129,6 +138,11 @@ def mb(value: int) -> str:
 
 def report(line: str) -> None:
     print(line)
+
+
+def python_restore_command(script: Path) -> str:
+    executable = sys.executable or "python3"
+    return f"{shlex.quote(executable)} {shlex.quote(str(script))}"
 
 
 def sqlite_connect(path: Path, *, readonly: bool) -> sqlite3.Connection:
@@ -256,6 +270,22 @@ def normalize_extended_path(value: str) -> str:
 
 def normalize_extended_paths_in_text(value: str) -> str:
     return value.replace("\\\\?\\UNC\\", "\\\\").replace("\\\\?\\", "")
+
+
+def extend_windows_path(value: str) -> str:
+    if value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + value[2:]
+    if WINDOWS_DRIVE_PATH_RE.match(value):
+        return "\\\\?\\" + value
+    return value
+
+
+def normalize_path_text(value: str, *, style: str) -> str:
+    if style == "extended":
+        return extend_windows_path(normalize_extended_path(value))
+    return normalize_extended_paths_in_text(value)
 
 
 def normalized_path(value: str) -> Path:
@@ -501,7 +531,8 @@ def repair_thread_metadata_bloat(
 def write_thread_metadata_restore_script(manifest: Path, state_db: Path, backup_root: Path) -> None:
     restore = backup_root / "restore-thread-metadata.py"
     restore.write_text(
-        f'''import json
+        f'''#!/usr/bin/env python3
+import json
 import sqlite3
 from pathlib import Path
 
@@ -512,7 +543,13 @@ conn.execute("pragma busy_timeout=10000")
 cols = {{row[1] for row in conn.execute('pragma table_info("threads")').fetchall()}}
 has_preview = "first_user_message" in cols
 for line in manifest.read_text(encoding="utf-8").splitlines():
-    rec = json.loads(line)
+    if not line.strip():
+        continue
+    try:
+        rec = json.loads(line)
+    except json.JSONDecodeError:
+        print(f"Skipping malformed manifest line: {{line[:80]}}", flush=True)
+        continue
     if has_preview:
         conn.execute(
             "update threads set title=?, first_user_message=? where id=?",
@@ -528,10 +565,103 @@ conn.close()
 ''',
         encoding="utf-8",
     )
+    restore.chmod(0o700)
     report(f"thread_metadata_restore_script {restore}")
+    report(f"thread_metadata_restore_command {python_restore_command(restore)}")
 
 
-def normalize_sqlite_paths(conn: sqlite3.Connection, apply: bool) -> int:
+def boolish(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def recover_thread_archive_state(
+    conn: sqlite3.Connection,
+    thread_ids: list[str],
+    *,
+    apply: bool,
+    details: bool,
+) -> None:
+    columns = table_columns(conn, "threads")
+    if "id" not in columns:
+        report("codex_thread_recovery skipped_missing_threads_id")
+        return
+    if "archived" not in columns and "archived_at" not in columns:
+        report("codex_thread_recovery skipped_missing_archive_columns")
+        return
+
+    title_expr = "title" if "title" in columns else "''"
+    archived_expr = "archived" if "archived" in columns else "NULL"
+    archived_at_expr = "archived_at" if "archived_at" in columns else "NULL"
+    candidates: list[ThreadArchiveRefreshCandidate] = []
+    missing: list[str] = []
+    for thread_id in thread_ids:
+        row = conn.execute(
+            f"select id, {title_expr}, {archived_expr}, {archived_at_expr} from threads where id=?",
+            (thread_id,),
+        ).fetchone()
+        if row is None:
+            missing.append(thread_id)
+            continue
+        _, title, archived, archived_at = row
+        candidates.append(
+            ThreadArchiveRefreshCandidate(
+                thread_id=thread_id,
+                title=title or "",
+                was_archived=boolish(archived) or archived_at is not None,
+            )
+        )
+
+    report(f"codex_thread_recovery_candidates {len(candidates)}")
+    for thread_id in missing:
+        report(f"codex_thread_recovery_missing thread_id={thread_id}")
+    for index, item in enumerate(candidates, start=1):
+        label = f"thread_{index:03d}"
+        state = "archived" if item.was_archived else "active"
+        if details:
+            report(
+                f"codex_thread_recovery_candidate {label} thread_id={item.thread_id} "
+                f"final_state={state} title={item.title[:70]}"
+            )
+        else:
+            report(f"codex_thread_recovery_candidate {label} final_state={state}")
+
+    if not apply or not candidates:
+        return
+
+    now = int(time.time())
+    cur = conn.cursor()
+
+    def set_archived_state(thread_id: str, archived: bool) -> None:
+        assignments: list[str] = []
+        params: list[object] = []
+        if "archived" in columns:
+            assignments.append("archived=?")
+            params.append(1 if archived else 0)
+        if "archived_at" in columns:
+            assignments.append("archived_at=?")
+            params.append(now if archived else None)
+        params.append(thread_id)
+        cur.execute(f"update threads set {', '.join(assignments)} where id=?", params)
+
+    for item in candidates:
+        set_archived_state(item.thread_id, archived=True)
+        set_archived_state(item.thread_id, archived=item.was_archived)
+    report(f"codex_thread_recovery_applied {len(candidates)}")
+
+
+def normalize_sqlite_paths(
+    conn: sqlite3.Connection,
+    apply: bool,
+    *,
+    style: str = "normal",
+    active_threads_only: bool = False,
+) -> int:
     cur = conn.cursor()
     total = 0
     tables = [
@@ -540,22 +670,33 @@ def normalize_sqlite_paths(conn: sqlite3.Connection, apply: bool) -> int:
             "select name from sqlite_master where type='table' and name not like 'sqlite_%'"
         )
     ]
+    if active_threads_only:
+        tables = [table for table in tables if table == "threads"]
     for table in tables:
         cols = cur.execute(f'pragma table_info("{table}")').fetchall()
+        column_names = {str(col[1]) for col in cols}
         text_cols = [
             col[1]
             for col in cols
             if ("TEXT" in (col[2] or "").upper() or col[2] == "") and is_path_column(str(col[1]))
         ]
         for col in text_cols:
-            rows = cur.execute(
-                f'select rowid, "{col}" from "{table}" where instr("{col}", ?) > 0',
-                ("\\\\?\\",),
-            ).fetchall()
+            if style == "extended":
+                where = f'"{col}" is not null'
+                if active_threads_only and table == "threads":
+                    where = f"{where} and {active_unarchived_expr(column_names)}"
+                rows = cur.execute(
+                    f'select rowid, "{col}" from "{table}" where {where}',
+                ).fetchall()
+            else:
+                rows = cur.execute(
+                    f'select rowid, "{col}" from "{table}" where instr("{col}", ?) > 0',
+                    ("\\\\?\\",),
+                ).fetchall()
             changed = 0
             for rowid, value in rows:
                 if isinstance(value, str):
-                    normalized = normalize_extended_paths_in_text(value)
+                    normalized = normalize_path_text(value, style=style)
                 else:
                     normalized = value
                 if normalized != value:
@@ -594,6 +735,35 @@ def normalize_metadata_text_paths(codex_home: Path, apply: bool) -> int:
     if total == 0:
         report("extended_paths_file 0")
     return total
+
+
+def hot_normalize_paths_once(codex_home: Path) -> int:
+    state_db = codex_home / "state_5.sqlite"
+    total = 0
+    if state_db.exists():
+        conn = sqlite_connect(state_db, readonly=False)
+        conn.execute("pragma busy_timeout=10000")
+        total += normalize_sqlite_paths(conn, True, style="extended", active_threads_only=True)
+        conn.commit()
+        conn.close()
+    return total
+
+
+def watch_hot_normalize_paths(codex_home: Path, *, seconds: int, interval_seconds: int) -> None:
+    if seconds <= 0:
+        return
+    interval = max(1, interval_seconds)
+    deadline = time.monotonic() + seconds
+    iteration = 0
+    report(f"hot_normalize_watch_start seconds={seconds} interval_seconds={interval}")
+    while time.monotonic() < deadline:
+        sleep_for = min(interval, max(0.0, deadline - time.monotonic()))
+        if sleep_for:
+            time.sleep(sleep_for)
+        iteration += 1
+        changed = hot_normalize_paths_once(codex_home)
+        report(f"hot_normalize_watch_iteration {iteration} changed={changed}")
+    report("hot_normalize_watch_done")
 
 
 def active_session_candidates(
@@ -877,7 +1047,8 @@ def write_session_restore_script(
 ) -> None:
     restore = backup_root / restore_name
     restore.write_text(
-        f'''import json
+        f'''#!/usr/bin/env python3
+import json
 import shutil
 import sqlite3
 from pathlib import Path
@@ -888,7 +1059,13 @@ conn = sqlite3.connect(db)
 conn.execute("pragma busy_timeout=10000")
 columns = {{row[1] for row in conn.execute('pragma table_info("threads")')}}
 for line in manifest.read_text(encoding="utf-8").splitlines():
-    rec = json.loads(line)
+    if not line.strip():
+        continue
+    try:
+        rec = json.loads(line)
+    except json.JSONDecodeError:
+        print(f"Skipping malformed manifest line: {{line[:80]}}", flush=True)
+        continue
     src = Path(rec["to"])
     dest = Path(rec["from"])
     if src.exists():
@@ -910,7 +1087,9 @@ conn.close()
 ''',
         encoding="utf-8",
     )
+    restore.chmod(0o700)
     report(f"session_restore_script {restore}")
+    report(f"session_restore_command {python_restore_command(restore)}")
 
 
 def prune_config(codex_home: Path, backup_root: Path, apply: bool, write_artifacts: bool) -> None:
@@ -973,8 +1152,39 @@ def move_stale_worktrees(codex_home: Path, backup_root: Path, days: int, stamp: 
             item_size = size_bytes(source)
             shutil.move(str(source), str(dest))
             handle.write(json.dumps({"from": str(source), "to": str(dest), "bytes": item_size}) + "\n")
+    write_worktree_restore_script(manifest, backup_root)
     report(f"worktree_archive_root {archive_root}")
     report(f"worktree_manifest {manifest}")
+
+
+def write_worktree_restore_script(manifest: Path, backup_root: Path) -> None:
+    restore = backup_root / "restore-worktrees.py"
+    restore.write_text(
+        f'''#!/usr/bin/env python3
+import json
+import shutil
+from pathlib import Path
+
+manifest = Path(r"{manifest}")
+for line in manifest.read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    try:
+        rec = json.loads(line)
+    except json.JSONDecodeError:
+        print(f"Skipping malformed manifest line: {{line[:80]}}", flush=True)
+        continue
+    src = Path(rec["to"])
+    dest = Path(rec["from"])
+    if src.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+''',
+        encoding="utf-8",
+    )
+    restore.chmod(0o700)
+    report(f"worktree_restore_script {restore}")
+    report(f"worktree_restore_command {python_restore_command(restore)}")
 
 
 def rotate_logs(codex_home: Path, threshold_mb: int, stamp: str, apply: bool) -> None:
@@ -1049,20 +1259,26 @@ def run(args: argparse.Namespace) -> int:
         report(f"codex_home_missing {codex_home}")
         return 2
 
+    recovery_thread_ids = getattr(args, "recover_thread_id", [])
+    recovery_mode = bool(recovery_thread_ids)
     stamp = now_stamp()
     backup_root = Path(args.backup_root).expanduser() if args.backup_root else documents_backup_root() / f"keep-codex-fast-{stamp}"
     backup_root = backup_root.resolve()
 
     running = codex_processes_running()
-    if args.apply and running and args.wait_for_codex_exit:
+    hot_normalize_paths = bool(getattr(args, "hot_normalize_paths", False))
+
+    if args.apply and running and args.wait_for_codex_exit and not recovery_mode and not hot_normalize_paths:
         report("waiting_for_codex_exit")
         wait_for_codex_exit()
         running = []
 
-    effective_apply = bool(args.apply and not running)
-    effective_backup = bool(effective_apply or args.backup_only)
+    effective_apply = bool(args.apply and (not running or recovery_mode))
+    hot_path_apply = bool(args.apply and running and hot_normalize_paths and not recovery_mode)
+    path_apply = bool(effective_apply or hot_path_apply)
+    effective_backup = bool(effective_apply or hot_path_apply or args.backup_only)
     requested_mode = "apply" if args.apply else "backup-only" if args.backup_only else "report"
-    effective_mode = "apply" if effective_apply else "backup-only" if effective_backup else "report"
+    effective_mode = "hot-normalize-paths" if hot_path_apply else "apply" if effective_apply else "backup-only" if effective_backup else "report"
     if args.details:
         report(f"codex_home {codex_home}")
         if effective_backup:
@@ -1075,24 +1291,49 @@ def run(args: argparse.Namespace) -> int:
         report("mode_safety read_only=true privacy=pseudonymous")
     elif effective_mode == "backup-only":
         report("mode_safety backup_only=true archives=false state_writes=false")
-    else:
+    elif effective_mode == "apply":
         report("mode_safety backup_first=true archive_only=true permanent_delete=false")
-    if args.apply and running:
+    else:
+        report("mode_safety backup_first=true hot_path_normalization_only=true archives=false logs=false worktrees=false metadata_repair=false")
+    if args.apply and running and not recovery_mode and not hot_path_apply:
         report("apply_skipped_codex_running")
         for index, proc in enumerate(running, start=1):
             if args.details:
                 report(f"blocking_process {proc}")
             else:
                 report(f"blocking_process codex_process_{index:03d}")
+    elif hot_path_apply:
+        report("hot_normalize_paths_codex_running")
+    if recovery_mode:
+        report("codex_thread_recovery_mode targeted=true broad_cleanup=false")
 
     if effective_backup:
         backup_metadata(codex_home, backup_root)
 
     state_db = codex_home / "state_5.sqlite"
     if state_db.exists():
-        conn = sqlite_connect(state_db, readonly=not effective_apply)
+        conn = sqlite_connect(state_db, readonly=not path_apply)
         conn.execute("pragma busy_timeout=10000")
-        normalize_sqlite_paths(conn, effective_apply)
+        if recovery_mode:
+            recover_thread_archive_state(
+                conn,
+                recovery_thread_ids,
+                apply=effective_apply,
+                details=args.details,
+            )
+            if effective_apply:
+                conn.commit()
+            conn.close()
+            report("done")
+            return 0
+
+        path_style = "extended" if hot_path_apply else "normal"
+        normalize_sqlite_paths(
+            conn,
+            path_apply,
+            style=path_style,
+            active_threads_only=hot_path_apply,
+        )
         report_thread_metadata_bloat(
             conn,
             title_limit=args.thread_title_limit,
@@ -1128,8 +1369,9 @@ def run(args: argparse.Namespace) -> int:
             args.archive_rollout_path,
         )
         archive_sessions(conn, candidates, codex_home, backup_root, stamp, effective_apply, args.details)
-        if effective_apply:
+        if path_apply:
             conn.commit()
+        if effective_apply:
             try:
                 conn.execute("pragma wal_checkpoint(truncate)")
             except Exception as exc:
@@ -1142,10 +1384,16 @@ def run(args: argparse.Namespace) -> int:
     else:
         report("state_db_missing")
 
-    normalize_metadata_text_paths(codex_home, effective_apply)
+    normalize_metadata_text_paths(codex_home, path_apply and not hot_path_apply)
     prune_config(codex_home, backup_root, effective_apply, effective_backup)
     move_stale_worktrees(codex_home, backup_root, args.worktree_older_than_days, stamp, effective_apply)
     rotate_logs(codex_home, args.rotate_logs_above_mb, stamp, effective_apply)
+    if hot_path_apply:
+        watch_hot_normalize_paths(
+            codex_home,
+            seconds=max(0, int(getattr(args, "hot_normalize_watch_seconds", 0))),
+            interval_seconds=max(1, int(getattr(args, "hot_normalize_interval_seconds", 30))),
+        )
     verify_sizes(codex_home)
     top_node_processes(args.details)
     report("done")
@@ -1157,6 +1405,26 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         description="Safe, backup-first, archive-only Codex local-state maintenance."
     )
     parser.add_argument("--apply", action="store_true", help="Apply maintenance actions. Default is report-only.")
+    parser.add_argument(
+        "--hot-normalize-paths",
+        action="store_true",
+        help=(
+            "With --apply, back up and normalize Windows extended paths even while Codex is running. "
+            "Only path normalization runs; archiving, log rotation, worktree moves, and metadata repair stay disabled."
+        ),
+    )
+    parser.add_argument(
+        "--hot-normalize-watch-seconds",
+        type=int,
+        default=0,
+        help="With --apply --hot-normalize-paths, keep repeating path normalization for this many seconds after the first pass.",
+    )
+    parser.add_argument(
+        "--hot-normalize-interval-seconds",
+        type=int,
+        default=30,
+        help="Interval between repeated hot path normalization passes. Default: 30.",
+    )
     parser.add_argument(
         "--backup-only",
         action="store_true",
@@ -1188,6 +1456,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="append",
         default=[],
         help="Archive one active session by rollout JSONL path, bypassing the age threshold. Can be repeated.",
+    )
+    parser.add_argument(
+        "--recover-thread-id",
+        action="append",
+        default=[],
+        help=(
+            "Refresh one stuck thread by toggling its archived state and restoring the original final state. "
+            "Use with --apply after a backup is created. Can be repeated."
+        ),
     )
     parser.add_argument("--worktree-older-than-days", type=int, default=7)
     parser.add_argument(
@@ -1227,6 +1504,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     for thread_id in args.archive_thread_id:
         if not THREAD_ID_RE.fullmatch(thread_id):
             parser.error(f"--archive-thread-id must be a UUID-like thread id: {thread_id}")
+    for thread_id in args.recover_thread_id:
+        if not THREAD_ID_RE.fullmatch(thread_id):
+            parser.error(f"--recover-thread-id must be a UUID-like thread id: {thread_id}")
     if args.archive_older_than_days < 0:
         parser.error("--archive-older-than-days must be non-negative")
     if args.thread_title_limit < 20:

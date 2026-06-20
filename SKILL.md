@@ -18,7 +18,7 @@ Primary principle: preserve continuity before applying changes. For active repo 
 - Back up before applying changes. Use `--backup-only` when the user wants backups without moving or changing local state.
 - Archive or move files instead of deleting them. Do not permanently delete user chats, logs, worktrees, memories, skills, plugins, or automations.
 - Write manifests and restore scripts when sessions/worktrees are moved.
-- If Codex is running, default to report-only. Apply changes only after Codex is closed or when the user explicitly accepts waiting for Codex to exit.
+- If Codex is running, default to report-only. Apply broad maintenance only after Codex is closed or when the user explicitly accepts waiting for Codex to exit. The narrow `--apply --hot-normalize-paths` mode may run while Codex is open because it backs up first and only aligns SQLite path fields to Codex Desktop's active `\\?\` path convention.
 - Never modify or copy credential files unless the user explicitly asks for that. Back up memory/skill/plugin/automation files before touching local state.
 - Treat backup folders as private local artifacts because they can contain Codex metadata. Do not ask users to publish or share backups unless they have reviewed them first.
 - Do not print raw thread IDs, chat titles, local paths, or process paths unless the user asks for details or runs `--details`.
@@ -32,8 +32,10 @@ There are three modes:
 
 - Inspect: report-only, no writes.
 - Maintain: normal `--apply`; backs up, archives old sessions, moves stale worktrees, rotates logs, prunes dead config, and normalizes paths. It does not trim thread title/preview metadata.
+- Hot path repair: `--apply --hot-normalize-paths`; backs up and aligns SQLite path fields to Codex Desktop's active `\\?\` path convention even while Codex is running. It does not archive sessions, rotate logs, move worktrees, prune config, or repair title/preview metadata.
 - Optional repair: `--apply --repair-thread-metadata-bloat`; shortens oversized SQLite display title/preview metadata after backup. The rollout transcript stays intact.
 - Optional malformed-task archive: `--apply --archive-malformed-local-tasks`; archives active no-user-event local task sessions with suspicious workspace roots such as `/` or OS temp folders after backup.
+- Targeted thread recovery: `--apply --recover-thread-id THREAD_ID`; backs up SQLite, refreshes one thread's archived state, restores its original final active/archived state, and skips broad cleanup.
 
 ## Default Workflow
 
@@ -83,6 +85,28 @@ or:
 python scripts/keep_codex_fast.py --apply --archive-rollout-path /path/to/rollout.jsonl
 ```
 
+If the current issue is only stale resume/automation path drift caused by Codex Desktop's `\\?\C:\...` active path convention, it is acceptable to hot-repair just active SQLite path fields while Codex is running:
+
+```bash
+python scripts/keep_codex_fast.py --apply --hot-normalize-paths
+```
+
+Do not combine this with archival or metadata-bloat expectations. Hot mode intentionally suppresses archiving, log rotation, worktree moves, config pruning, config path rewrites, and title/preview repair while Codex is open.
+
+If Codex immediately writes the extended paths back from in-memory state, use a bounded watch window:
+
+```bash
+python scripts/keep_codex_fast.py --apply --hot-normalize-paths --hot-normalize-watch-seconds 300 --hot-normalize-interval-seconds 30
+```
+
+If the user wants to recover a Codex Desktop thread that shows `Error submitting message`, `Error creating task`, or `agent loop died unexpectedly`, use `$codex-thread-recovery` when available. If they specifically want the `keep-codex-fast` storage-level tool path, run the targeted recovery mode:
+
+```bash
+python scripts/keep_codex_fast.py --apply --recover-thread-id THREAD_ID
+```
+
+That mode is backup-first and intentionally narrow. It refreshes only the requested row's archive state and then exits without stale-session archiving, path cleanup, config pruning, log rotation, malformed-task archiving, or metadata repair.
+
 7. Verify after applying:
 
 ```bash
@@ -99,12 +123,16 @@ If the user wants automation and the Codex app automation tool is available, cre
 ## What Apply Does
 
 - Backs up important metadata to `~/Documents/Codex/codex-backups/keep-codex-fast-*`.
+- Writes restore scripts and copy-paste-safe Python restore commands for moved sessions/worktrees and repaired thread metadata.
 - Archives old non-pinned sessions to `~/.codex/archived_sessions/`.
 - Uses `updated_at` for age-based session archiving by default, or `created_at` with `--archive-age-field created_at`.
 - Supports targeted session archiving with `--archive-thread-id` or `--archive-rollout-path`, still backup-first and archive-only.
+- Supports targeted thread recovery with `--recover-thread-id`, still backup-first and one-thread only.
 - Normalizes Windows extended paths like `\\?\C:\...` inside local SQLite text fields and selected metadata files such as `config.toml`.
+- With `--apply --hot-normalize-paths`, aligns active SQLite path fields to the active `\\?\` convention while Codex is running, after backup.
+- With `--hot-normalize-watch-seconds`, repeats only that hot path alignment for a bounded window so automations/resumes can get past a running app that rewrites active rows.
 - Prunes missing/temp project blocks from `config.toml` and writes UTF-8 without BOM.
-- Moves stale worktrees to `~/.codex/archived_worktrees/`.
+- Moves stale worktrees to `~/.codex/archived_worktrees/` and writes a restore helper.
 - Rotates `logs_2.sqlite*` and `log/codex-tui.log` into `~/.codex/archived_logs/` only when above the threshold.
 - Reports heavy Node processes without killing them.
 - Reports pathological active thread titles and `first_user_message` previews. It only repairs them when the user explicitly opts in with `--repair-thread-metadata-bloat`.
@@ -122,6 +150,8 @@ Report mode does none of those mutations. It only prints counts and pseudonymous
 - When in doubt, leave a chat active or ask the user. Never archive a chat that is pinned, current, or explicitly marked as still needed without a handoff.
 - Treat title/preview repair as metadata repair only. The full rollout transcript remains in the session JSONL; bounded SQLite fields are for list/navigation display.
 - Treat malformed local task archiving as cleanup for synthetic/no-user-event sessions. It should not target normal chats with user events.
+- Treat hot path repair as path alignment only. It should not archive, prune, rotate, move, or rewrite config while Codex is running.
+- Treat targeted thread recovery as a liveness nudge, not broad maintenance. Prefer Codex app thread APIs when available; use the script when the user wants the local tooling path.
 
 ## Thread Metadata Bloat
 

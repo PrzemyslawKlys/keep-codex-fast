@@ -14,8 +14,10 @@ The rule is simple:
 
 - **Inspect:** report-only, no writes.
 - **Maintain:** normal apply; backs up, archives old sessions, moves stale worktrees, rotates logs, prunes dead config, and normalizes paths. It does not trim thread title/preview metadata.
+- **Hot path repair:** only with `--apply --hot-normalize-paths`; backs up SQLite and aligns active thread path fields to Codex Desktop's running `\\?\` path convention.
 - **Optional repair:** only with `--apply --repair-thread-metadata-bloat`; shortens oversized SQLite display title/preview metadata after backup. The transcript stays intact.
 - **Optional malformed-task archive:** only with `--apply --archive-malformed-local-tasks`; archives active no-user-event local task sessions with suspicious workspace roots such as `/` or OS temp folders.
+- **Targeted thread recovery:** only with `--apply --recover-thread-id THREAD_ID`; backs up SQLite, refreshes one thread's archived state, and skips broad cleanup.
 
 ## Who This Is For
 
@@ -36,10 +38,10 @@ It helps Codex:
 - see which local state has grown over time
 - create handoff docs before archiving old chats
 - back up important state before applying changes
-- archive old chats instead of deleting them
+- archive old chats instead of deleting them, with restore helpers
 - detect pathological thread title/preview metadata that can slow chat navigation
 - detect malformed active local-task sessions that can make Codex Desktop repeatedly log `No cwd found for local task`
-- move stale worktrees out of the hot path
+- move stale worktrees out of the hot path, with restore helpers
 - rotate large logs
 - prune dead project references
 - report heavy Node/dev processes without killing them
@@ -229,6 +231,34 @@ Optionally archive malformed no-user-event local tasks when the report recommend
 python scripts/keep_codex_fast.py --apply --archive-malformed-local-tasks
 ```
 
+Hot-repair active Codex thread paths while Codex is running:
+
+```bash
+python scripts/keep_codex_fast.py --apply --hot-normalize-paths
+```
+
+This mode is intentionally narrow. It creates a backup and updates active SQLite path fields to Codex Desktop's running `\\?\` path convention. It does not archive sessions, rotate logs, move worktrees, prune config, or repair title/preview metadata.
+
+If Codex writes those path fields back while it is running, use a bounded watch window:
+
+```bash
+python scripts/keep_codex_fast.py --apply --hot-normalize-paths --hot-normalize-watch-seconds 300 --hot-normalize-interval-seconds 30
+```
+
+Windows users can launch the same bounded watcher hidden with:
+
+```powershell
+wscript.exe scripts\run_hot_normalize_paths_hidden.vbs
+```
+
+Recover one stuck Codex Desktop thread by refreshing only that thread's archive state:
+
+```bash
+python scripts/keep_codex_fast.py --apply --recover-thread-id 00000000-0000-0000-0000-000000000000
+```
+
+This mode is intentionally narrow. It creates a SQLite backup, toggles the target thread through an archived state, restores the thread to its original final active/archived state, and exits without moving sessions, rotating logs, pruning config, or running broad cleanup. Prefer the Codex app archive/unarchive API first when available; this CLI option is the backup-first storage-level equivalent for local tooling.
+
 Wait for Codex to exit before applying:
 
 ```bash
@@ -244,10 +274,12 @@ The skill can safely handle:
 - large `logs_2.sqlite*` and `log/codex-tui.log` files
 - dead/temp project entries in `config.toml`
 - Windows `\\?\C:\...` path mismatches in local SQLite text fields and selected metadata files such as `config.toml`
+- active Codex thread path drift while Codex is running, only with `--hot-normalize-paths`
 - oversized thread title and first-message preview metadata in `state_5.sqlite`, only with `--repair-thread-metadata-bloat`
 - malformed no-user-event local task sessions, only with `--archive-malformed-local-tasks`
+- a single wedged thread's archive state, only with `--recover-thread-id`
 
-It does not permanently delete chats, logs, or worktrees. It moves them into archive folders and writes backup/restore artifacts before applying changes.
+It does not permanently delete chats, logs, or worktrees. It moves them into archive folders and writes backup/restore artifacts before applying changes. Restore scripts are emitted with copy-paste-safe Python commands, including when the backup path contains spaces.
 
 ## Mental Model
 

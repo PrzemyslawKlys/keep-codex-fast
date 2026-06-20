@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -315,6 +316,88 @@ def assert_backup_only_mode(module) -> None:
         assert len(preview) > 240, "backup-only mode must not trim previews"
 
 
+def assert_hot_normalize_paths_while_running(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_fake_home(Path(td))
+        backup = Path(td) / "backup-hot"
+        config = paths["codex_home"] / "config.toml"
+        config.write_text(
+            '[projects."\\\\?\\C:\\\\DefinitelyMissingKeepCodexFast"]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        conn = sqlite3.connect(paths["state_db"])
+        conn.execute(
+            "insert into threads values (?,?,?,?,?,?,?,?,?)",
+            (
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "Archived",
+                "Archived",
+                r"C:\Users\tester\.codex\sessions\archived.jsonl",
+                r"C:\Archived",
+                int(time.time()),
+                int(time.time()),
+                int(time.time()),
+                1,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        original_process_probe = module.codex_processes_running
+        module.codex_processes_running = lambda: ["123 Codex.exe"]
+        args = argparse.Namespace(
+            apply=True,
+            backup_only=False,
+            details=False,
+            wait_for_codex_exit=False,
+            hot_normalize_paths=True,
+            hot_normalize_watch_seconds=0,
+            hot_normalize_interval_seconds=1,
+            codex_home=str(paths["codex_home"]),
+            backup_root=str(backup),
+            archive_older_than_days=10,
+            archive_age_field="updated_at",
+            archive_thread_id=[],
+            archive_rollout_path=[],
+            recover_thread_id=[],
+            worktree_older_than_days=7,
+            rotate_logs_above_mb=0,
+            thread_title_limit=120,
+            thread_preview_limit=240,
+            repair_thread_metadata_bloat=True,
+            archive_malformed_local_tasks=True,
+        )
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output):
+                assert module.run(args) == 0
+        finally:
+            module.codex_processes_running = original_process_probe
+        text = output.getvalue()
+        assert "effective_mode hot-normalize-paths" in text
+        assert "hot_normalize_paths_codex_running" in text
+        assert (backup / "state_5.sqlite").exists()
+        assert paths["rollout"].exists(), "hot path mode must not archive sessions"
+        assert paths["worktree"].exists(), "hot path mode must not move worktrees"
+        assert paths["log_file"].exists(), "hot path mode must not rotate logs"
+        assert paths["tui_log_file"].exists(), "hot path mode must not rotate TUI logs"
+        conn = sqlite3.connect(paths["state_db"])
+        title, preview, cwd = conn.execute(
+            "select title, first_user_message, cwd from threads where id=?",
+            ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",),
+        ).fetchone()
+        archived_rollout, archived_cwd = conn.execute(
+            "select rollout_path, cwd from threads where id=?",
+            ("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",),
+        ).fetchone()
+        conn.close()
+        assert cwd == r"\\?\C:\DefinitelyMissingKeepCodexFast"
+        assert archived_rollout == r"C:\Users\tester\.codex\sessions\archived.jsonl"
+        assert archived_cwd == r"C:\Archived"
+        assert "\\\\?\\" in config.read_text(encoding="utf-8"), "hot path mode must not rewrite config while Codex is running"
+        assert len(title) > 120, "hot path mode must not trim titles"
+        assert len(preview) > 240, "hot path mode must not trim previews"
+
+
 def assert_session_alias_detection(module) -> None:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -495,7 +578,7 @@ def assert_targeted_session_archive(module) -> None:
 def assert_apply_mode(module) -> None:
     with tempfile.TemporaryDirectory() as td:
         paths = make_fake_home(Path(td))
-        backup = Path(td) / "backup-apply"
+        backup = Path(td) / "backup apply with spaces"
         (paths["codex_home"] / "session_index.jsonl").write_text(
             '{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","thread_name":"Friendly Agent","updated_at":"2026-01-01T00:00:00.000Z"}\n',
             encoding="utf-8",
@@ -517,7 +600,10 @@ def assert_apply_mode(module) -> None:
             thread_preview_limit=240,
             repair_thread_metadata_bloat=True,
         )
-        assert module.run(args) == 0
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert module.run(args) == 0
+        text = output.getvalue()
 
         conn = sqlite3.connect(paths["state_db"])
         archived, archived_at, rollout_path, cwd, title, preview = conn.execute(
@@ -540,12 +626,62 @@ def assert_apply_mode(module) -> None:
         assert "DefinitelyMissingKeepCodexFast" not in (paths["codex_home"] / "config.toml").read_text(
             encoding="utf-8"
         )
-        assert (backup / "restore-sessions.py").exists()
-        assert (backup / "restore-thread-metadata.py").exists()
+        resolved_backup = backup.resolve()
+        session_restore = resolved_backup / "restore-sessions.py"
+        metadata_restore = resolved_backup / "restore-thread-metadata.py"
+        worktree_restore = resolved_backup / "restore-worktrees.py"
+        assert session_restore.exists()
+        assert metadata_restore.exists()
+        assert worktree_restore.exists()
+        if os.name != "nt":
+            assert os.access(session_restore, os.X_OK)
+            assert os.access(metadata_restore, os.X_OK)
+            assert os.access(worktree_restore, os.X_OK)
+        assert f"session_restore_command {module.python_restore_command(session_restore)}" in text
+        assert f"thread_metadata_restore_command {module.python_restore_command(metadata_restore)}" in text
+        assert f"worktree_restore_command {module.python_restore_command(worktree_restore)}" in text
         assert (backup / "moved-sessions.jsonl").exists()
         assert (backup / "thread-metadata-repairs.jsonl").exists()
         assert (backup / "moved-worktrees.jsonl").exists()
         assert latest_session_index_name(paths["codex_home"], "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa") == "Friendly Agent"
+
+
+def assert_worktree_restore_round_trip(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        codex_home = root / ".codex"
+        backup = root / "backup-worktree"
+        backup.mkdir(parents=True)
+        worktree = codex_home / "worktrees" / "oldtree" / "src"
+        worktree.mkdir(parents=True)
+        payload = worktree / "file.txt"
+        payload.write_text("worktree-payload", encoding="utf-8")
+        old_time = time.time() - 30 * 86400
+        os.utime(codex_home / "worktrees" / "oldtree", (old_time, old_time))
+
+        stamp = module.now_stamp()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            module.move_stale_worktrees(codex_home, backup, days=7, stamp=stamp, apply=True)
+        text = output.getvalue()
+
+        assert not (codex_home / "worktrees" / "oldtree").exists(), "stale worktree must be moved out of hot path"
+        archived = list((codex_home / "archived_worktrees").rglob("file.txt"))
+        assert len(archived) == 1, "worktree payload must exist in archive after apply"
+        assert archived[0].read_text(encoding="utf-8") == "worktree-payload"
+
+        manifest = backup / "moved-worktrees.jsonl"
+        restore = backup / "restore-worktrees.py"
+        assert manifest.exists(), "apply must write moved-worktrees manifest"
+        assert restore.exists(), "apply must write restore-worktrees.py"
+        assert f"worktree_restore_command {module.python_restore_command(restore)}" in text
+
+        result = subprocess.run([sys.executable, str(restore)], capture_output=True, text=True)
+        assert result.returncode == 0, f"restore script failed: {result.stderr}"
+        restored = codex_home / "worktrees" / "oldtree" / "src" / "file.txt"
+        assert restored.exists(), "restore must move worktree back to original path"
+        assert restored.read_text(encoding="utf-8") == "worktree-payload"
+        assert not list((codex_home / "archived_worktrees").rglob("file.txt")), "archive must be emptied after restore"
 
 
 def assert_repair_adds_bounded_name_when_no_existing_name(module) -> None:
@@ -826,10 +962,56 @@ def assert_malformed_local_task_archive_without_archived_column(module) -> None:
         assert paths["malformed_rollout"].exists()
 
 
+def assert_recover_thread_archive_refresh_is_targeted(module) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        paths = make_fake_home(Path(td))
+        backup = Path(td) / "backup-recover"
+        args = argparse.Namespace(
+            apply=True,
+            backup_only=False,
+            details=False,
+            wait_for_codex_exit=False,
+            codex_home=str(paths["codex_home"]),
+            backup_root=str(backup),
+            archive_older_than_days=10,
+            archive_age_field="updated_at",
+            archive_thread_id=[],
+            archive_rollout_path=[],
+            recover_thread_id=["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+            worktree_older_than_days=7,
+            rotate_logs_above_mb=0,
+            thread_title_limit=120,
+            thread_preview_limit=240,
+            repair_thread_metadata_bloat=False,
+            archive_malformed_local_tasks=False,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert module.run(args) == 0
+        text = output.getvalue()
+
+        conn = sqlite3.connect(paths["state_db"])
+        archived, archived_at, rollout_path = conn.execute(
+            "select archived, archived_at, rollout_path from threads where id=?",
+            ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",),
+        ).fetchone()
+        conn.close()
+
+        assert "codex_thread_recovery_mode targeted=true broad_cleanup=false" in text
+        assert "codex_thread_recovery_applied 1" in text
+        assert archived == 0
+        assert archived_at is None
+        assert rollout_path == str(paths["rollout"])
+        assert paths["rollout"].exists(), "thread recovery must not archive the session transcript"
+        assert (backup / "state_5.sqlite").exists(), "thread recovery must back up state first"
+        assert not (backup / "moved-sessions.jsonl").exists()
+
+
 def main() -> int:
     module = load_module()
     assert_report_mode(module)
     assert_backup_only_mode(module)
+    assert_hot_normalize_paths_while_running(module)
     assert_session_alias_detection(module)
     assert_extended_rollout_path_detection(module)
     assert_extended_path_normalization_targets_path_fields_and_config(module)
@@ -840,8 +1022,10 @@ def main() -> int:
     assert_malformed_local_task_archive_is_explicit(module)
     assert_malformed_local_task_archive_mode(module)
     assert_malformed_local_task_archive_without_archived_column(module)
+    assert_recover_thread_archive_refresh_is_targeted(module)
     assert_repair_adds_bounded_name_when_no_existing_name(module)
     assert_repair_restores_existing_name_when_title_is_already_bounded(module)
+    assert_worktree_restore_round_trip(module)
     assert_apply_mode(module)
     print("smoke tests passed")
     return 0
